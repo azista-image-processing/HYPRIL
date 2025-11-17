@@ -1,6 +1,4 @@
-
 # src/ui/Pixel_Info_Window.py
-
 import os
 import numpy as np
 import pandas as pd
@@ -43,7 +41,9 @@ class PixelInfoWindow(QDialog):
         self.geotransform = geotransform
         self.projection = projection
         self.wavelengths = self._parse_wavelengths(self.metadata)
-        self.wavelength_units = self.metadata.get("wavelength_units", "nm")
+        print("Parsed wavelengths:", self.wavelengths)
+
+        self.wavelength_units = self.metadata.get("wavelength_units", "")
         self.x = x
         self.y = y
         self.cursor = None # For mplcursors
@@ -116,8 +116,10 @@ class PixelInfoWindow(QDialog):
     def _parse_wavelengths(self, metadata: dict) -> list[float]:
         """Safely parses wavelengths from metadata."""
         try:
-            wavelength_str = metadata.get("wavelength")
+            wavelength_str = metadata.get("Wavelengths")
             if wavelength_str:
+                if isinstance(wavelength_str, list):
+                    return [float(w) for w in wavelength_str]
                 return [float(w) for w in str(wavelength_str).strip('{}').split(',')]
         except (ValueError, AttributeError):
             pass # Fails silently, returns empty list
@@ -224,7 +226,7 @@ class PixelInfoWindow(QDialog):
         self.geotransform = geotransform
         self.projection = projection
         self.wavelengths = self._parse_wavelengths(metadata)
-        self.wavelength_units = metadata.get("wavelength_units", "nm")
+        self.wavelength_units = metadata.get("wavelength_units", " ")
         
         # Now, call the existing update function to refresh the display
         self.update_pixel_info(x, y)

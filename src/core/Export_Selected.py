@@ -1,3 +1,4 @@
+#src/core/Export_Selected.py
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, 
                                QLineEdit, QPushButton, QComboBox, QGroupBox, 
                                QRadioButton, QListWidget, QDialogButtonBox, 
@@ -93,26 +94,13 @@ class TiffExportDialog(QDialog):
         
         # # Show layer info
         shape = self.layer['data'].shape
-        # info_layout.addRow("Dimensions:", f"{shape[0]} × {shape[1]} × {shape[2]}")
-        
-        # if self.layer.get('geotransform'):
-        #     info_layout.addRow("Georeferenced:", "Yes")
-        # else:
-        #     info_layout.addRow("Georeferenced:", "No")
-            
-        # data_size_mb = (shape[0] * shape[1] * shape[2] * 4) / (1024 * 1024)  # Assume float32
-        # info_layout.addRow("Approx. Size:", f"{data_size_mb:.1f} MB")
-        # NEW - These work correctly:
+
         dimensions_label = QLabel(f"{shape[0]} × {shape[1]} × {shape[2]}")
         info_layout.addRow("Dimensions:", dimensions_label)
 
         georef_label = QLabel("Yes" if self.layer.get('geotransform') else "No")
         info_layout.addRow("Georeferenced:", georef_label)
 
-        # size_label = QLabel(f"{data_size_mb:.1f} MB")
-        # info_layout.addRow("Approx. Size:", size_label)
-        # layout.addWidget(info_group)
-        
         # Buttons
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         button_box.accepted.connect(self.accept)

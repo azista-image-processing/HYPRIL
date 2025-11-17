@@ -1,4 +1,4 @@
-# import sys
+#src/ui/raster_calculator.py
 import re
 import os
 import ast
@@ -11,6 +11,15 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Signal, Qt, QThread, Signal
 from PySide6.QtGui import QFont
+
+PRESET_WAVELENGTHS = {
+    'NDVI': {'Red': 650, 'NIR': 840},
+    'NDWI': {'Green': 550, 'NIR': 840},
+    'EVI': {'Blue': 450, 'Red': 650, 'NIR': 840},
+    'Band Ratio': {},  # user selects manually
+    'Band Difference': {},
+    'Normalized Difference': {}
+}
 
 class BandSelectionDialog(QDialog):
     """Dialog for selecting bands for preset calculations"""
@@ -26,6 +35,8 @@ class BandSelectionDialog(QDialog):
         
         self._setup_ui()
         self._connect_signals()
+        self._update_band_combos()
+        self._update_preview()
         
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -116,7 +127,7 @@ class BandSelectionDialog(QDialog):
     
     def _get_required_bands(self):
         band_requirements = {
-            'NDVI': {'Red': 'Red band (~660nm)', 'NIR': 'Near-Infrared band (~840nm)'},
+            'NDVI': {'Red': 'Red band (~650nm)', 'NIR': 'Near-Infrared band (~840nm)'},
             'NDWI': {'Green': 'Green band (~560nm)', 'NIR': 'Near-Infrared band (~840nm)'},
             'EVI': {'Blue': 'Blue band (~470nm)', 'Red': 'Red band (~660nm)', 'NIR': 'Near-Infrared band (~840nm)'},
             'Band Ratio': {'Band1': 'First band (numerator)', 'Band2': 'Second band (denominator)'},
@@ -125,34 +136,110 @@ class BandSelectionDialog(QDialog):
         }
         return band_requirements.get(self.preset_name, {'Band1': 'First band', 'Band2': 'Second band'})
     
-    def _populate_band_combo(self, combo):
-        if self.all_layers:
-            current_layer = self.all_layers[0]
-            band_names = current_layer.get("band_names", [])
-            combo.addItem("-- Select Band --", "")  # Add default option
-            for i, name in enumerate(band_names):
-                # combo.addItem(f"b{i+1}: {name}", f"b{i+1}")
-                combo.addItem(f"b{i+1}: {name}", {"id": f"b{i+1}", "name": name})
-    
+    # def _populate_band_combo(self, combo):
+    #     if self.all_layers:
+    #         current_layer = self.all_layers[0]
+    #         band_names = current_layer.get("band_names", [])
+    #         self.wavelengths = current_layer.get("metadata", {}).get("wavelength", [])
+            
+    #         # I want to store both band number and its wavelength
+            
+
+
+
+
+    #         combo.addItem("-- Select Band --", "")  # Add default option
+    #         for i, name in enumerate(band_names):
+    #             # combo.addItem(f"b{i+1}: {name}", f"b{i+1}")
+    #             combo.addItem(f"b{i+1}: {name}", {"id": f"b{i+1}", "name": name})
+    def _populate_band_combo(self, combo, layer=None):
+        """
+        Populate a single QComboBox with band items.
+        Each item's data is a dict: {"id": "bX", "name": name, "wavelength": wl}
+        """
+        combo.clear()
+        combo.addItem("-- Select Band --", None)
+
+        if not self.all_layers:
+            return
+
+        # Use given layer or default to first one
+        target_layer = layer if layer is not None else self.all_layers[0]
+        print(f"target_layer: {target_layer['name']}")
+        band_names = target_layer.get("band_names", [])
+        wavelengths = target_layer.get("metadata", {}).get("Wavelengths", [None] * len(band_names))
+        if type(wavelengths) is not list:
+            wavelengths = [float(x)*1000 if float(x)<100 else float(x) for x in target_layer.get("metadata", {}).get("Wavelengths", "").replace("{","").replace("}","").split(",") if x.strip()]
+        for i, name in enumerate(band_names):
+            wl = wavelengths[i] if i < len(wavelengths) else None
+            display = f"b{i+1}: {name}"
+            if wl is not None:
+                display += f" ({wl:.1f} nm)"
+            data = {"id": f"b{i+1}", "name": name, "wavelength": wl}
+            combo.addItem(display, data)
+
     def _update_band_combos(self):
         layer_name = self.layer_combo.currentText()
         if not layer_name:
             return
-            
-        # Find the selected layer
+
+        # Find selected layer
         selected_layer = None
         for layer in self.all_layers:
-            if layer['name'] == layer_name:
+            if layer["name"] == layer_name:
                 selected_layer = layer
                 break
+
+        if not selected_layer:
+            return
+
+        # Repopulate each combo using selected layer
+        for combo in self.band_selections.values():
+            self._populate_band_combo(combo, layer=selected_layer)
+
+        # Auto-select closest bands based on wavelength
+        auto_bands = self._auto_select_bands(selected_layer)
+        for band_key, combo in self.band_selections.items():
+            if band_key in auto_bands:
+                target_id = auto_bands[band_key]["id"]
+                for i in range(combo.count()):
+                    data = combo.itemData(i)
+                    if isinstance(data, dict) and data.get("id") == target_id:
+                        combo.setCurrentIndex(i)
+                        break
+
+
+
+    # def _update_band_combos(self):
+    #     layer_name = self.layer_combo.currentText()
+    #     if not layer_name:
+    #         return
+            
+    #     # Find the selected layer
+    #     selected_layer = None
+    #     for layer in self.all_layers:
+    #         if layer['name'] == layer_name:
+    #             selected_layer = layer
+    #             break
         
-        if selected_layer:
-            band_names = selected_layer.get("band_names", [])
-            for combo in self.band_selections.values():
-                combo.clear()
-                combo.addItem("-- Select Band --", "")
-                for i, name in enumerate(band_names):
-                    combo.addItem(f"b{i+1}: {name}", f"b{i+1}")
+    #     if selected_layer:
+    #         band_names = selected_layer.get("band_names", [])
+    #         for combo in self.band_selections.values():
+    #             combo.clear()
+    #             combo.addItem("-- Select Band --", "")
+    #             for i, name in enumerate(band_names):
+    #                 combo.addItem(f"b{i+1}: {name}", f"b{i+1}")
+
+
+    #         # Auto-select bands based on wavelength if possible
+    #         auto_bands = self._auto_select_bands(selected_layer)
+    #         for band_key, combo in self.band_selections.items():
+    #             if band_key in auto_bands:
+    #                 for i in range(combo.count()):
+    #                     data = combo.itemData(i)
+    #                     if data and data["id"] == auto_bands[band_key]["id"]:
+    #                         combo.setCurrentIndex(i)
+    #                         break
     
     def _update_preview(self):
         """Update expression preview"""
@@ -160,6 +247,7 @@ class BandSelectionDialog(QDialog):
             layer_name = self.layer_combo.currentText()
             if not layer_name:
                 self.preview_label.setText("Select a layer first...")
+                print("wretertwert")
                 return
             
             # Check if all bands are selected
@@ -214,19 +302,38 @@ class BandSelectionDialog(QDialog):
         else:
             return f'"{layer_name}@{bands.get("Band1", {"id": "b1"})["id"]}" op "{layer_name}@{bands.get("Band2", {"id": "b2"})["id"]}"'
 
+    def _auto_select_bands(self, layer):
+        """
+        Automatically select bands based on wavelength for the preset.
+        Returns a dict like {'Red': {...}, 'NIR': {...}}
+        """
+        selected = {}
+        target_wavelengths = PRESET_WAVELENGTHS.get(self.preset_name, {})
+        wavelengths = layer.get("metadata", {}).get("Wavelengths", [])
+        band_names = layer.get("band_names", [])
+        if wavelengths:
+            if type(wavelengths) is not list:
+                wavelengths = [float(x)*1000 if float(x)<100 else float(x) for x in layer.get("metadata", {}).get("Wavelengths", "").replace("{","").replace("}","").split(",") if x.strip()]
+            for band_key, target_wl in target_wavelengths.items():
+                closest_idx = None
+                min_diff = float('inf')
+                for i, wl in enumerate(wavelengths):
+                    if wl is None:
+                        continue
+                    diff = abs(wl - target_wl)
+                    if diff < min_diff:
+                        min_diff = diff
+                        closest_idx = i
+                if closest_idx is not None:
+                    selected[band_key] = {
+                        "id": f"b{closest_idx+1}",
+                        "name": band_names[closest_idx],
+                        "wavelength": wavelengths[closest_idx]
+                    }
+            return selected
+        return {}
 
-    # def _generate_expression_preview(self, layer_name, bands):
-    #     """Generate expression preview without storing state"""
-    #     expressions = {
-    #         'NDVI': f'("{layer_name}@{bands["NIR"]}" - "{layer_name}@{bands["Red"]}") / ("{layer_name}@{bands["NIR"]}" + "{layer_name}@{bands["Red"]}")',
-    #         'NDWI': f'("{layer_name}@{bands["Green"]}" - "{layer_name}@{bands["NIR"]}") / ("{layer_name}@{bands["Green"]}" + "{layer_name}@{bands["NIR"]}")',
-    #         'EVI': f'2.5 * (("{layer_name}@{bands["NIR"]}" - "{layer_name}@{bands["Red"]}") / ("{layer_name}@{bands["NIR"]}" + 6 * "{layer_name}@{bands["Red"]}" - 7.5 * "{layer_name}@{bands["Blue"]}" + 1))',
-    #         'Band Ratio': f'"{layer_name}@{bands["Band1"]}" / "{layer_name}@{bands["Band2"]}"',
-    #         'Band Difference': f'"{layer_name}@{bands["Band1"]}" - "{layer_name}@{bands["Band2"]}"',
-    #         'Normalized Difference': f'("{layer_name}@{bands["Band1"]}" - "{layer_name}@{bands["Band2"]}") / ("{layer_name}@{bands["Band1"]}" + "{layer_name}@{bands["Band2"]}")'
-    #     }
-    #     return expressions.get(self.preset_name, f'"{layer_name}@{bands.get("Band1", "b1")}" op "{layer_name}@{bands.get("Band2", "b2")}"')
-    
+
     def _validate_and_accept(self):
         layer_name = self.layer_combo.currentText()
         if not layer_name:
@@ -281,27 +388,6 @@ class BandSelectionDialog(QDialog):
         except Exception as e:
             print(f"Unexpected error in get_expression: {e}")
             return ""
-
-    # def get_expression(self):
-    #     """Generate expression based on preset and selected bands"""
-    #     if not self.selected_layer or not self.selected_bands:
-    #         return ""
-        
-    #     try:
-    #         expressions = {
-    #             'NDVI': f'("{self.selected_layer}@{self.selected_bands["NIR"]}" - "{self.selected_layer}@{self.selected_bands["Red"]}") / ("{self.selected_layer}@{self.selected_bands["NIR"]}" + "{self.selected_layer}@{self.selected_bands["Red"]}")',
-    #             'NDWI': f'("{self.selected_layer}@{self.selected_bands["Green"]}" - "{self.selected_layer}@{self.selected_bands["NIR"]}") / ("{self.selected_layer}@{self.selected_bands["Green"]}" + "{self.selected_layer}@{self.selected_bands["NIR"]}")',
-    #             'EVI': f'2.5 * (("{self.selected_layer}@{self.selected_bands["NIR"]}" - "{self.selected_layer}@{self.selected_bands["Red"]}") / ("{self.selected_layer}@{self.selected_bands["NIR"]}" + 6 * "{self.selected_layer}@{self.selected_bands["Red"]}" - 7.5 * "{self.selected_layer}@{self.selected_bands["Blue"]}" + 1))',
-    #             'Band Ratio': f'"{self.selected_layer}@{self.selected_bands["Band1"]}" / "{self.selected_layer}@{self.selected_bands["Band2"]}"',
-    #             'Band Difference': f'"{self.selected_layer}@{self.selected_bands["Band1"]}" - "{self.selected_layer}@{self.selected_bands["Band2"]}"',
-    #             'Normalized Difference': f'("{self.selected_layer}@{self.selected_bands["Band1"]}" - "{self.selected_layer}@{self.selected_bands["Band2"]}") / ("{self.selected_layer}@{self.selected_bands["Band1"]}" + "{self.selected_layer}@{self.selected_bands["Band2"]}")'
-    #         }
-    #         return expressions.get(self.preset_name, '')
-    #     except KeyError as e:
-    #         print(f"KeyError in get_expression: {e}")
-    #         print(f"Available keys: {list(self.selected_bands.keys())}")
-    #         print(f"Required for {self.preset_name}: {list(self._get_required_bands().keys())}")
-    #         return ""
 
 class ExpressionValidator:
     """Validates mathematical expressions for raster calculations"""
@@ -615,7 +701,17 @@ class RasterCalculatorWindow(QDialog):
         self.bands_list.clear()
         selected_layer = self.all_layers[index]
         band_names = selected_layer.get("band_names", [])
-        self.bands_list.addItems([f'b{i+1}: {name}' for i, name in enumerate(band_names)])
+        wavelengths = selected_layer.get("metadata", {}).get("wavelength", [])
+        
+
+        #checking type of wavelengths and if it is having any value or not
+        if type(wavelengths) is not list:
+            wavelengths = [float(x)*1000 if float(x)<100 else float(x) for x in selected_layer.get("metadata", {}).get("wavelength", "").replace("{","").replace("}","").split(",") if x.strip()]
+
+        if len(wavelengths) == len(band_names):
+            self.bands_list.addItems([f'b{i+1}: {name} ({wavelengths[i]:.2f} nm)' for i, name in enumerate(band_names)])
+        else:
+            self.bands_list.addItems([f'b{i+1}: {name}' for i, name in enumerate(band_names)])
 
     def _update_layer_info(self):
         if not self.all_layers:
@@ -625,7 +721,9 @@ class RasterCalculatorWindow(QDialog):
         info_text = f"Name: {layer['name']}\n"
         info_text += f"Dimensions: {layer['data'].shape}\n"
         info_text += f"Data Type: {layer['data'].dtype}\n"
-        info_text += f"Bands: {layer['data'].shape[2]}"
+        info_text += f"Bands: {layer['data'].shape[2]}\n"
+        # self.metadata = layer['metadata']['Wavelengths']
+ 
         self.layer_info.setText(info_text)
 
     def _add_band_to_expression(self, item):
@@ -655,6 +753,7 @@ class RasterCalculatorWindow(QDialog):
         if preset_name == "Select preset...":
             return
         
+        
         if not self.all_layers:
             QMessageBox.warning(self, "No Layers", "Please load raster layers first.")
             return
@@ -675,28 +774,6 @@ class RasterCalculatorWindow(QDialog):
                                 "Please check that you selected the correct bands.")
         else:
             print("Band selection dialog was cancelled")
-
-
-    # def _apply_preset(self):
-    #     """Apply selected preset with band selection dialog"""
-    #     preset_name = self.preset_combo.currentText()
-    #     if preset_name == "Select preset...":
-    #         return
-        
-    #     if not self.all_layers:
-    #         QMessageBox.warning(self, "No Layers", "Please load raster layers first.")
-    #         return
-        
-    #     # Show band selection dialog
-    #     band_dialog = BandSelectionDialog(preset_name, self.all_layers, self)
-    #     if band_dialog.exec() == QDialog.DialogCode.Accepted:
-    #         expression = band_dialog.get_expression()
-    #         if expression:  # Only set if we got a valid expression
-    #             self.expression_edit.setPlainText(expression)
-    #             # Auto-validate after applying preset
-    #             self._validate_expression()
-    #         else:
-    #             QMessageBox.warning(self, "Expression Error", "Could not generate expression. Please try again.")
 
     def _validate_expression(self):
         """Validate the current expression"""

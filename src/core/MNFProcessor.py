@@ -1,5 +1,4 @@
 # src/core/MNFProcessor.py
-
 import numpy as np
 import hyperspy.api as hs
 from spectral import noise_from_diffs
@@ -22,10 +21,12 @@ class MNFViewerWindow(QMainWindow):
     An interactive window to view MNF components with navigation, animation,
     and an option to add the result as a new layer.
     """
-    def __init__(self, mnf_components, eigenvalues, parent_viewer=None):
+    def __init__(self, mnf_components, eigenvalues, layer_name, parent_viewer=None):
         super().__init__()
         self.mnf_components = mnf_components
         self.eigenvalues = eigenvalues
+        # store an optional source layer name for descriptive exports
+        self.layer_name = layer_name if layer_name is not None else "MNF"
         self.num_components = mnf_components.shape[2]
         self.current_component = 0
         self.parent_viewer = parent_viewer  # Reference to the main ImageViewerWindow
@@ -65,13 +66,12 @@ class MNFViewerWindow(QMainWindow):
         #adding selected component
         controls_layout.addWidget(QLabel("Component "))
         self.selected_component = QSpinBox()
-        # self.selected_component.setMinimum(1)   # Component numbers start at 1
+        # Ensure users select at least 1 component and at most the number available
+        self.selected_component.setMinimum(1)
         self.selected_component.setMaximum(self.num_components)  # Set max number of MNF components
+        self.selected_component.setValue(1)
         controls_layout.addWidget(self.selected_component)
-        # Later, get integer input
-        # selected_component = self.selected_component.value()
-            
-            # Add after your component selection SpinBox
+
         self.show_eigen_button = QPushButton("Show Eigenvalues")
         controls_layout.addWidget(self.show_eigen_button)
 
@@ -115,20 +115,39 @@ class MNFViewerWindow(QMainWindow):
         """Adds the full MNF components cube as a new layer in the main viewer."""
             
         
-        if self.parent_viewer:
-            if self.selected_component is not None:
-                comp_index = self.selected_component.value()
-                print(f" mnf component shape: {self.mnf_components.shape}" )
-                print(f" {comp_index} component selected for export")
-                self.mnf_components= self.mnf_components[ : , : ,:comp_index]
-                print(f" selected  component shape: {self.mnf_components.shape}" )
+        if not self.parent_viewer:
+            return
 
-            self.parent_viewer.add_layer(
-                image_data=self.mnf_components,
-                name="MNF Components"
-            )
-            QMessageBox.information(self, "Success", "MNF components added as a new layer.")
-            self.close() # Close the viewer after adding the layer
+        # Number of components to include (spinbox enforced to be >=1)
+        comp_index = int(self.selected_component.value()) if self.selected_component is not None else self.num_components
+
+        # Validate
+        if comp_index < 1:
+            QMessageBox.warning(self, "Warning", "Please select at least 1 component to export.")
+            return
+
+        # Do not mutate the original mnf_components in the viewer; slice into a new array
+        try:
+            export_cube = self.mnf_components[:, :, :comp_index].copy()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not prepare MNF components for export: {e}")
+            return
+
+        # Ensure float32 dtype for downstream display/storage
+        try:
+            export_cube = export_cube.astype(np.float32)
+        except Exception:
+            pass
+        
+
+        # Add to parent viewer as a new layer with a descriptive name
+        self.parent_viewer.add_layer(
+            image_data=export_cube,
+            name=f"{self.layer_name} (MNF {comp_index})"
+        )
+
+        QMessageBox.information(self, "Success", "MNF components added as a new layer.")
+        self.close()  # Close the viewer after adding the layer
 
     def show_component(self):
         xlim, ylim = None, None
@@ -210,10 +229,12 @@ class MNFViewerWindow(QMainWindow):
 
 
 class MNFProcessor:
-    def __init__(self, data):
+    def __init__(self, data, layer_name=None):
         if not isinstance(data, np.ndarray) or data.ndim != 3:
              raise ValueError("Data must be a 3D numpy array (height, width, bands)")
         self.data = data
+        # layer_name is optional for backwards compatibility
+        self.layer_name = layer_name if layer_name is not None else "MNF Components"
         self.mnf_components = None
         self.eigenvalues = None
         self.noise_stats = None
@@ -234,6 +255,9 @@ class MNFProcessor:
 
 
     def apply_mnf(self):
+        #applying check whether image is loaded or not
+        if self.data is None:
+            raise ValueError("No data loaded. Please load an image before applying MNF.")
         print(f"From MNF calculator {self.data.shape}")
 
         print(f"Zero {np.sum(self.data ==0)}")
@@ -303,7 +327,7 @@ class MNFProcessor:
             self.mnf_viewer_window.activateWindow()
             return
         print(f"MNF component from display_interactive_mnf function: {self.mnf_components.shape}")
-        self.mnf_viewer_window = MNFViewerWindow(self.mnf_components, self.eigen_values, parent_viewer )
+        self.mnf_viewer_window = MNFViewerWindow(self.mnf_components, self.eigen_values, self.layer_name, parent_viewer )
         self.mnf_viewer_window.show()
 
 

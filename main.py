@@ -5,12 +5,9 @@ ne.set_num_threads(32)   # or any number ≤ cores
 
 
 from PySide6.QtWidgets import QApplication
-# from src.ui.main_window import HyperspectralViewer
 from src.ui.Image_Viewer_Window import ImageViewerWindow
 
 if __name__ == '__main__':
-    # Create the application instance
-    # app = QApplication(sys.argv)
     app = QApplication.instance() or QApplication(sys.argv)
     window = ImageViewerWindow()
     window.show()

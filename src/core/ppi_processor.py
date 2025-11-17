@@ -8,6 +8,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 from typing import List, Dict, Optional, Tuple
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 class PPI_Processor:
@@ -59,13 +60,15 @@ class PPI_Processor:
         
         if self.processing_layer is None:
             raise ValueError("Processing (MNF) layer not set.")
-        
+    
         self.data = self.processing_layer['data']
         original_shape = self.data.shape
         
         print(f"Original Data Shape: {original_shape}")
         data_2d = self.data.reshape(-1, original_shape[-1])
-        use_gpu = False
+    #checking for availablility of GPU
+        use_gpu = cp.cuda.is_available()
+
         if use_gpu == True:
             start_time= cp.cuda.Event()
             start_time.record()
@@ -164,54 +167,94 @@ class PPI_Processor:
         
         else:
             start_time = time.time()
-            print("Using CPU to calculate PPI..........")
-            # Normalize data (handle zero vectors)
+            num_threads = 8
+            print("Using multithreading to calculate PPI..........")
+
             norms = np.linalg.norm(data_2d, axis=1, keepdims=True)
             norms[norms == 0] = 1
-            data_2d_normalized = data_2d / norms            
+            data_2d_normalized = data_2d / norms
             num_pixels, num_bands = data_2d.shape
-            ppi_scores = np.zeros(num_pixels, dtype=np.float32)            
-            print(f"Calculating PPI with {num_iterations} iterations (threshold: {threshold_factor})...")
-            # Generate all skewers at once for efficiency
+            ppi_scores = np.zeros(num_pixels, dtype=np.float32)
+
+            print(f"Calculating PPI with {num_iterations} iterations using {num_threads} threads...")
             skewers = np.random.randn(num_iterations, num_bands)
             skewers /= np.linalg.norm(skewers, axis=1, keepdims=True)
-            # Project all data onto all skewers
-            projections = data_2d_normalized @ skewers.T  # Shape: (num_pixels, num_iterations)
-            # print("Projection shape",projections.shape)
-            
-            # Find extrema for each skewer with threshold
-            for j in range(num_iterations):
-                projection = projections[:, j]
-                max_val = np.max(projection)
-                min_val = np.min(projection)
-                projection_range = max_val - min_val
-                # print(f"projetion range for iteration {j}: {projection_range}")
+            projections = data_2d_normalized @ skewers.T
 
-                threshold = projection_range*threshold_factor
-                # print(f"Threshold: {threshold}")
-                
-                # Find pixels within threshold of extrema
+            # Define single worker function
+            def process_skewer(j):
+                projection = projections[:, j]
+                max_val, min_val = np.max(projection), np.min(projection)
+                projection_range = max_val - min_val
+                threshold = projection_range * threshold_factor
                 max_extremes = np.where(projection >= (max_val - threshold))[0]
                 min_extremes = np.where(projection <= (min_val + threshold))[0]
                 
-                # Increment PPI scores
-                ppi_scores[max_extremes] += 1
-                ppi_scores[min_extremes] += 1
-                
-                # Progress reporting
-                if (j + 1) % 500 == 0:
-                    print(f"  Progress: {j+1}/{num_iterations} iterations")
-            
-            self.ppi_scores = ppi_scores.reshape(original_shape[0], original_shape[1])
-            print(f"Total extreme count : {np.count_nonzero(ppi_scores)}  ")
-            self.projections = projections
-            self.skewers = skewers
-            print(f"PPI calculation completed with thresshold {threshold_factor} in {num_iterations}.")
+                return np.concatenate((max_extremes, min_extremes))
+
+            with ThreadPoolExecutor(max_workers=num_threads) as executor:
+                results = executor.map(process_skewer, range(num_iterations))
+
+            # Combine results
+            for res in results:
+                np.add.at(ppi_scores, res, 1)
+
             end_time = time.time()
-            elapsed_time = end_time - start_time
-            print(f"Time Taken with CPU {elapsed_time} seconds")
-            # self.plot_ppi_3d(self.data, self.ppi_scores)
-            return self.ppi_scores, self.projections , self.skewers
+            print(f"Total extreme count: {np.count_nonzero(ppi_scores)}")
+            print(f"Time taken with multithreading: {end_time - start_time:.2f} sec")
+
+            return ppi_scores.reshape(original_shape[0], original_shape[1]), projections, skewers
+        
+        
+            # start_time = time.time()
+            # print("Using CPU to calculate PPI..........")
+            # # Normalize data (handle zero vectors)
+            # norms = np.linalg.norm(data_2d, axis=1, keepdims=True)
+            # norms[norms == 0] = 1
+            # data_2d_normalized = data_2d / norms            
+            # num_pixels, num_bands = data_2d.shape
+            # ppi_scores = np.zeros(num_pixels, dtype=np.float32)            
+            # print(f"Calculating PPI with {num_iterations} iterations (threshold: {threshold_factor})...")
+            # # Generate all skewers at once for efficiency
+            # skewers = np.random.randn(num_iterations, num_bands)
+            # skewers /= np.linalg.norm(skewers, axis=1, keepdims=True)
+            # # Project all data onto all skewers
+            # projections = data_2d_normalized @ skewers.T  # Shape: (num_pixels, num_iterations)
+            # # print("Projection shape",projections.shape)
+            
+            # # Find extrema for each skewer with threshold
+            # for j in range(num_iterations):
+            #     projection = projections[:, j]
+            #     max_val = np.max(projection)
+            #     min_val = np.min(projection)
+            #     projection_range = max_val - min_val
+            #     # print(f"projetion range for iteration {j}: {projection_range}")
+
+            #     threshold = projection_range*threshold_factor
+            #     # print(f"Threshold: {threshold}")
+                
+            #     # Find pixels within threshold of extrema
+            #     max_extremes = np.where(projection >= (max_val - threshold))[0]
+            #     min_extremes = np.where(projection <= (min_val + threshold))[0]
+                
+            #     # Increment PPI scores
+            #     ppi_scores[max_extremes] += 1
+            #     ppi_scores[min_extremes] += 1
+                
+            #     # Progress reporting
+            #     if (j + 1) % 500 == 0:
+            #         print(f"  Progress: {j+1}/{num_iterations} iterations")
+            
+            # self.ppi_scores = ppi_scores.reshape(original_shape[0], original_shape[1])
+            # print(f"Total extreme count : {np.count_nonzero(ppi_scores)}  ")
+            # self.projections = projections
+            # self.skewers = skewers
+            # print(f"PPI calculation completed with thresshold {threshold_factor} in {num_iterations}.")
+            # end_time = time.time()
+            # elapsed_time = end_time - start_time
+            # print(f"Time Taken with CPU {elapsed_time} seconds")
+            # # self.plot_ppi_3d(self.data, self.ppi_scores)
+            # return self.ppi_scores, self.projections , self.skewers
 
 
 

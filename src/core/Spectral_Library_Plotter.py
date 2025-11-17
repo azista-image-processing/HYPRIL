@@ -1,5 +1,4 @@
 #src/core/Spectral_Library_Plotter.py
-
 import os
 import numpy as np
 from osgeo import gdal
@@ -249,6 +248,3 @@ class SpectralLibraryPlotter:
 
         except Exception as e:
             logger.error(f"Error plotting spectral library {file_path}: {str(e)}")
-            # This part is for integration with a main app window that has a status bar
-            # if parent and hasattr(parent, 'statusBar'):
-            #     parent.statusBar().showMessage(f"Error plotting spectral library: {str(e)}", 10000)

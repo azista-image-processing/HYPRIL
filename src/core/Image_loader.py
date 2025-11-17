@@ -1,10 +1,11 @@
+#src/core/Image_loader.py
 from importlib import metadata
 import os
 import sys
 import time
 import logging
 import numpy as np
-from osgeo import gdal
+from osgeo import gdal,gdal_array
 import xarray as xr
 from PySide6.QtWidgets import (QApplication, QMainWindow, QPushButton, QVBoxLayout, QFileDialog,
                                QWidget, QDialog, QListWidget, QLabel, 
@@ -82,66 +83,73 @@ class HyperspectralImageLoader:
 
     @classmethod
     def open_file_dialog(cls, parent=None) -> List['HyperspectralImageLoader']:
-        """
-        Opens a file dialog. If the file has subdatasets, it prompts the user
-        to select which ones to load, returning each as a separate object in a list.
-        """
-        file_path, _ = QFileDialog.getOpenFileName(
-            parent,
-            "Open Hyperspectral Image",
-            "",
-            "All Supported Files (*.hdr *.tif *.tiff *.h5 *.hdf *.nc *.jp2);;"
-            "ENVI Files (*.hdr);;" 
-            "GeoTIFF Files (*.tif *.tiff);;"
-            "Sentinel-2 Files (*.jp2);;"
-            "HDF/NetCDF Files (*.h5 *.hdf *.nc);;"
-        )
-        print("file_path in open_file_dialog:", file_path)
-        if not file_path:
-            logger.info("No file selected by the user.")
-            return []
-        #making file_path global to be used in ahead
-
-        paths_to_load = []
-
         try:
-            if file_path.lower().endswith('.hdr'):
-                logger.info("HDR file detected, searching for corresponding data file.")
-                real_file_path = cls(file_path=file_path)._find_data_file()
-            else:
-                real_file_path = file_path
-            temp_dataset = gdal.Open(real_file_path, gdal.GA_ReadOnly)
-            if temp_dataset is None:
-                raise IOError("GDAL could not open the initial file path.")
-            subdatasets = temp_dataset.GetMetadata('SUBDATASETS')
-            temp_dataset = None
+            """
+            Opens a file dialog. If the file has subdatasets, it prompts the user
+            to select which ones to load, returning each as a separate object in a list.
+            """
+            file_path, _ = QFileDialog.getOpenFileName(
+                parent,
+                "Open Hyperspectral Image",
+                "",
+                "All Supported Files (*.hdr *.tif *.tiff *.h5 *.hdf *.nc *.jp2);;"
+                "ENVI Files (*.hdr);;" 
+                "GeoTIFF Files (*.tif *.tiff);;"
+                "Sentinel-2 Files (*.jp2);;"
+                "HDF/NetCDF Files (*.h5 *.hdf *.nc);;"
+            )
+            print("file_path in open_file_dialog:", file_path)
+            if not file_path:
+                logger.info("No file selected by the user.")
+                return []
+            #making file_path global to be used in ahead
 
-            if subdatasets:
-                logger.info(f"Found {len(subdatasets) // 2} subdatasets. Prompting user.")
-                dialog = SubdatasetSelectionDialog(subdatasets, parent)
-                if dialog.exec():
-                    paths_to_load = dialog.get_selected_paths()
-                    if not paths_to_load:
-                        logger.info("User did not select any subdatasets.")
+            paths_to_load = []
+
+            try:
+                if file_path.lower().endswith('.hdr'):
+                    logger.info("HDR file detected, searching for corresponding data file.")
+                    real_file_path = cls(file_path=file_path)._find_data_file()
                 else:
-                    logger.info("User cancelled subdataset selection.")
-            else:
-                paths_to_load.append(file_path)
+                    real_file_path = file_path
+                temp_dataset = gdal.Open(real_file_path, gdal.GA_ReadOnly)
+                if temp_dataset is None:
+                    raise IOError("GDAL could not open the initial file path.")
+                subdatasets = temp_dataset.GetMetadata('SUBDATASETS')
+                temp_dataset = None
 
+                if subdatasets:
+                    logger.info(f"Found {len(subdatasets) // 2} subdatasets. Prompting user.")
+                    dialog = SubdatasetSelectionDialog(subdatasets, parent)
+                    if dialog.exec():
+                        paths_to_load = dialog.get_selected_paths()
+                        if not paths_to_load:
+                            logger.info("User did not select any subdatasets.")
+                    else:
+                        logger.info("User cancelled subdataset selection.")
+                else:
+                    paths_to_load.append(file_path)
+
+            except Exception as e:
+                logger.error(f"Error during subdataset check for {file_path}: {e}", exc_info=True)
+                return []
+            
+            loaded_images = []
+            try:
+                for i, path in enumerate(paths_to_load):
+                    logger.info(f"Loading item {i+1}/{len(paths_to_load)}...")
+                    loader = cls(file_path=path, parent=parent)
+                    if loader.load():
+                        loaded_images.append(loader)
+                    else:
+                        logger.warning(f"Failed to load item: {path}")
+            except Exception as e:
+                logger.error(f"Error during loading of selected datasets: {e}", exc_info=True)
+
+            return loaded_images
         except Exception as e:
-            logger.error(f"Error during subdataset check for {file_path}: {e}", exc_info=True)
+            logger.error(f"Unexpected error in open_file_dialog: {e}", exc_info=True)
             return []
-        
-        loaded_images = []
-        for i, path in enumerate(paths_to_load):
-            logger.info(f"Loading item {i+1}/{len(paths_to_load)}...")
-            loader = cls(file_path=path, parent=parent)
-            if loader.load():
-                loaded_images.append(loader)
-            else:
-                logger.warning(f"Failed to load item: {path}")
-
-        return loaded_images
 
     def load(self, chunk_size: Optional[Tuple[int, int]] = None) -> bool:
         try:
@@ -188,7 +196,7 @@ class HyperspectralImageLoader:
         base_name = os.path.splitext(os.path.basename(self._initial_file_path))[0]
         files_lower_map = {f.lower(): f for f in os.listdir(folder)}
 
-        for ext in ['', '.bil', '.bsq', '.dat', '.img', '.hdf', '.h5', '.nc', '.l1r', '.int', '.raw']:
+        for ext in ['', '.bil', '.bsq', '.dat', '.img', '.hdf', '.h5', '.nc', '.l1r', '.int', '.raw' , '.tif', '.tiff']:
             target_file_lower = (base_name + ext).lower()
             if target_file_lower in files_lower_map:
                 original_filename = files_lower_map[target_file_lower]
@@ -199,7 +207,14 @@ class HyperspectralImageLoader:
         raise FileNotFoundError(f"No corresponding data file found for {self._initial_file_path}")
 
     def _read_gdal_dataset(self) -> gdal.Dataset:
+        start = time.time()
+        logger.info(f"Opening dataset with GDAL: {self.file_path}")
         dataset = gdal.Open(self.file_path, gdal.GA_ReadOnly)
+        band0 = dataset.GetRasterBand(1)
+        gdal_dtype = band0.DataType
+        self.np_dtype = gdal_array.GDALTypeCodeToNumericTypeCode(gdal_dtype)
+        end = time.time()
+        logger.info(f"GDAL dataset opened in {end - start:.2f} seconds.")
         if dataset is None:
             raise ValueError(f"GDAL could not open resource: {self.file_path}")
         return dataset
@@ -221,7 +236,13 @@ class HyperspectralImageLoader:
                     if chunk.ndim == 2: chunk = chunk[:, :, np.newaxis]
                     self.image_data[y:y+chunk_rows, x:x+chunk_cols, :] = np.moveaxis(chunk, 0, -1)
         else:
-            image_data_gdal = self._dataset.ReadAsArray().astype(np.float32)
+            start = time.time()
+            image_data_gdal = self._dataset.ReadAsArray()#.astype(self.np_dtype)
+            # image_data_gdal = np.where(image_data_gdal == 0, np.nan, image_data_gdal)
+
+
+            end = time.time()
+            logger.info(f"Image data read from GDAL in {end - start:.2f} seconds.")
              # Count problematic values
             zero_count = np.sum(image_data_gdal == 0)
             negative_count = np.sum(image_data_gdal < 0)
@@ -233,28 +254,11 @@ class HyperspectralImageLoader:
             print(f"  Zero values: {zero_count} ({zero_count/total_pixels*100:.2f}%)")
             print(f"  Negative values: {negative_count} ({negative_count/total_pixels*100:.2f}%)")
             print(f"  NaN values: {nan_count} ({nan_count/total_pixels*100:.2f}%)")
-            # eps = 1e-03
-            # if zero_count > 0 or negative_count > 0 or nan_count > 0:
-            #     # Create comprehensive mask for all problematic values
-            #     problematic_mask = (image_data_gdal == 0) | (image_data_gdal < 0) | np.isnan(image_data_gdal)
-                
-            #     # Apply eps replacement
-            #     image_data_gdal[problematic_mask] = eps
-                
-            #     # Verify cleaning
-            #     verification_zero = np.sum(image_data_gdal == 0)
-            #     verification_negative = np.sum(image_data_gdal < 0)
-            #     verification_nan = np.sum(np.isnan(image_data_gdal))
-                
-            #     logging.info(f"Data cleaning completed: {zero_count} zeros, {negative_count} negatives, {nan_count} NaNs replaced with {eps}")
-            #     logging.info(f"Post-cleaning verification: {verification_zero} zeros, {verification_negative} negatives, {verification_nan} NaNs remaining")
-                
-            #     if verification_zero > 0 or verification_negative > 0 or verification_nan > 0:
-            #         logging.warning("Some problematic values may still remain after cleaning!")
+        
             if image_data_gdal.ndim == 3:
-                self.image_data = np.moveaxis(image_data_gdal, 0, -1).astype(np.float32)
+                self.image_data = np.moveaxis(image_data_gdal, 0, -1)
             elif image_data_gdal.ndim == 2:
-                self.image_data = image_data_gdal[:, :, np.newaxis].astype(np.float32)
+                self.image_data = image_data_gdal[:, :, np.newaxis]
             else:
                 raise ValueError(f"Unsupported image dimension: {image_data_gdal.ndim}")
         end = time.time()
@@ -294,21 +298,27 @@ class HyperspectralImageLoader:
     # 
     def _parse_metadata(self):
 
-        wavelengths = []
+        # wavelengths = []    
         print("file_path in parse_metadata:", self.file_path)
-        if self.file_path and self.file_path.lower().endswith('.hdr'):
-            with open(self.file_path, "r") as f:
-                text = f.read()
-                # Extract the block inside { }
-                import re
-                match = re.search(r"wavelength\s*=\s*{([^}]*)}", text, re.IGNORECASE | re.DOTALL)
-                if match:
-                    wl_str = match.group(1)
-                    self.wavelengths = [float(w) for w in wl_str.replace(",", " ").split()]
-                    # print("Wavelengths:", self.wavelengths)   
-                    # print("Total bands:", len(self.wavelengths))
-                else:
-                    print("No wavelength found")
+        if not self.file_path.lower().endswith('.hdr'):
+            hdr_path = os.path.splitext(self.file_path)[0] + '.hdr'
+            print("Using header file:", hdr_path)
+        try:
+            if hdr_path and hdr_path.lower().endswith('.hdr'):
+                with open(hdr_path, "r") as f:
+                    text = f.read()
+                    # Extract the block inside { }
+                    import re
+                    match = re.search(r"wavelength\s*=\s*{([^}]*)}", text, re.IGNORECASE | re.DOTALL)
+                    if match:
+                        wl_str = match.group(1)
+                        self.wavelengths = [float(w) for w in wl_str.replace(",", " ").split()]
+                        print("Wavelengths:", self.wavelengths)   
+                        print("Total bands:", len(self.wavelengths))
+                    else:
+                        print("No wavelength found")
+        except Exception as e:
+            print(f"Error reading header file for wavelengths: {e}")
 
 
         self.metadata = self._dataset.GetMetadata("ENVI") or self._dataset.GetMetadata()

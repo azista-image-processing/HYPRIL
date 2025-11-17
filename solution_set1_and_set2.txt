@@ -1,0 +1,167 @@
+
+Set-1
+
+1. What is the data type of the value 3.14 in Python?
+a) int
+b) float (Correct)
+c) str
+d) complex
+e) bool
+Explanation: 3.14 is a decimal number, so its data type is float.
+
+2. What will type("123") return?
+a) int
+b) float
+c) str (Correct)
+d) list
+e) integer
+Explanation: "123" is a string literal, so its type is str.
+
+3. Which data type in Python is mutable?
+a) tuple
+b) string
+c) list (Correct)
+d) frozenset
+e) None
+Explanation: Lists can be modified after creation, unlike tuples or strings.
+
+4. How can you convert a list into a tuple?​
+a) tuple() (Correct)​
+b) list()​
+c) to_tuple()​
+d) convert()​
+e) tuple{}​
+Explanation: The tuple() function converts lists to tuples.
+
+5. What is the main difference between a list and a set in Python?
+a) List is unordered, Set is ordered
+b) List allows duplicates, Set doesn’t (Correct)
+c) Both are ordered
+d) Set allows duplicates, List doesn’t
+e) None of the Above
+Explanation: Lists allow duplicate elements and preserve order; sets don't.
+
+6. What data type is returned by the expression {1, 2, 3}?
+a) dict
+b) list
+c) tuple
+d) set (Correct)
+e) int
+Explanation: Curly braces with comma-separated values create a set literal unless it's key-value pairs.
+
+7. How do you check the data type of a variable in Python?
+a) datatype(x)
+b) typeof(x)
+c) type(x) (Correct)
+d) checktype(x)
+e) dtype(x)
+Explanation: type() returns the data type of a variable.
+
+8. What happens if you try to use a list as a key in a dictionary?
+a) It works normally
+b) It converts list into a tuple automatically
+c) It raises an error: unhashable type 'list' (Correct)
+d) It removes duplicates and works fine
+e) Error not found
+Explanation: Lists are mutable and cannot be dictionary keys.
+
+9. What is the data type of the variable after this code executes? x = {"a": 1, "b": 2}
+a) dict (Correct)
+b) list
+c) set
+d) tuple
+e) dic
+Explanation: Curly braces with key-value pairs define a dictionary.
+
+10. What is the difference between is and == in Python?
+a) Both compare values only
+b) is compares identity, == compares values (Correct)
+c) Both compare identity only
+d) == compares memory location
+e) All of the above
+Explanation: "is" checks if two variables point to the same object; "==" checks if values are equal.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Set-2
+
+1. What is the output data type of this expression? (5 >= 2)
+a) int
+b) bool (Correct)
+c) str
+d) float
+Explanation: The comparison returns a boolean value True or False.
+
+2. What is the data type of the result of input() in Python 3?
+a) int
+b) str (Correct)
+c) float
+d) bool
+Explanation: input() returns a string by default.
+
+3. How can you convert a string '25' into an integer 25?
+a) integer('25')
+b) str(25)
+c) float('25')
+d) int('25') (Correct)
+Explanation: int() converts string digits into integers.
+
+4. What will be the type of None in Python?
+a) <class 'bool'>
+b) <class 'NoneType'> (Correct)
+c) <class 'str'>
+d) <class 'object'>
+Explanation: None is a special constant of type NoneType.
+
+5. What is the difference between a shallow copy and a deep copy in lists?
+a) Shallow copy duplicates nested objects, deep copy doesn’t
+b) Deep copy duplicates nested objects, shallow copy doesn’t (Correct)
+c) Both duplicate nested objects
+d) Neither duplicates nested objects
+Explanation: Deep copy copies all nested objects recursively; shallow copy copies references only.
+
+6. What is the result of type({}) and type(set())?
+a) dict and set (Correct)
+b) set and dict
+c) list and tuple
+d) str and bool
+Explanation: {} creates an empty dictionary; set() creates an empty set.
+
+7. How can you remove duplicate elements from a list using data types?
+a) list(set(list_name)) (Correct)
+b) list(unique(list_name))
+c) remove_duplicates(list_name)
+d) set(list_name).list()
+Explanation: Converting to a set removes duplicates; converting back to list restores list type.
+
+8. What is the difference between a tuple (1, 2, 3) and a list ?​
+a) Tuple is mutable, List is immutable
+b) Tuple is immutable, List is mutable (Correct)
+c) Both are mutable
+d) Both are immutable
+Explanation: Lists can be changed; tuples cannot.
+
+9. Can a Python dictionary have two keys with the same name?
+a) Yes, it merges both keys
+b) Yes, but only if values are same
+c) No, last key overwrites the previous one (Correct)
+d) No, it throws an error
+Explanation: Duplicate keys overwrite previous keys in dictionaries.
+
+10. What does immutable mean in Python?
+a) Object can be changed after creation
+b) Object cannot be changed after creation (Correct)
+c) Object can be deleted
+d) Object can store multiple data types
+Explanation: Immutable objects cannot be altered after creation, like tuples or strings.

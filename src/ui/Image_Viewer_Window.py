@@ -1,31 +1,41 @@
 #src/ui/Image_Viewer_Window.py
-
 import os
 import numpy as np
 import matplotlib.pyplot as plt
 
 from PySide6.QtCore import Qt, Signal, QTimer, QSize
-from PySide6.QtGui import QAction, QKeySequence, QIcon
+from PySide6.QtGui import QAction, QKeySequence, QIcon, QPixmap
 from PySide6.QtWidgets import (QTableWidgetItem,QHeaderView, QLineEdit, QTabWidget, QDialog, QVBoxLayout, QHBoxLayout, QWidget, QToolButton, QMenuBar, QMenu,  QSlider, QSpinBox,
-    QListWidget, QListWidgetItem, QTableWidget, QRadioButton, QComboBox, QLabel, QGroupBox, QStatusBar, QTextEdit,
+    QListWidget, QListWidgetItem, QTableWidget, QRadioButton, QComboBox, QLabel, QGroupBox, QStatusBar,
     QErrorMessage, QFileDialog, QPushButton, QAbstractItemView, QMainWindow , QFrame, QMessageBox,QSizePolicy
 )
+
 from datetime import datetime
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
+
+
 from src.core.Spectral_Library_Plotter import SpectralLibraryPlotter
 from src.ui.Pixel_Info_Window import PixelInfoWindow
 from src.core.MNFProcessor import MNFProcessor
 from src.core.Image_loader import HyperspectralImageLoader
-import logging
 from src.ui.ppi_workflow_window import PPI_Workflow_Window
 from src.core.Export_Selected import TiffExportDialog
 from src.ui.raster_calculator import RasterCalculatorWindow
+from src.core.aoi_selector import AOISelector
 
-# --- Constants ---s
+# --- Constants ---
 MODE_SINGLE = "Single Band"
 MODE_RGB = "RGB Composite"
 ZOOM_FACTOR = 1.2
+
+import logging
+
+logging.basicConfig(level=logging.INFO)
+import importlib.util
+import sys
+import pathlib
+import glob
 
 
 class LayerListWidget(QListWidget):
@@ -37,9 +47,6 @@ class LayerListWidget(QListWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         logging.info("Initialized LayerListWidget with drag-and-drop support.")
-        # Enable multiple selection and drag-and-drop
-        # self.setSelectionBehavior(QAbstractItemView.SelectRows)
-        # self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setSelectionMode(QAbstractItemView.SingleSelection)
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
@@ -61,10 +68,6 @@ class LayerListWidget(QListWidget):
         if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
             # Let parent window handle removal to keep lists in sync
             self.parent().remove_selected_layer()
-
-        # elif event.key() == Qt.Key_D and event.modifiers() & Qt.ControlModifier:
-        #     self.parent().remove_selected_layer()
-
         else:
             super().keyPressEvent(event)
         logging.info("Key press event in LayerListWidget: %s", event.text())
@@ -217,19 +220,39 @@ class AnimationViewerWindow(QMainWindow):
 
 
 
+from PySide6.QtGui import QIcon
+
+
 class ImageViewerWindow(QMainWindow):
     def __init__(self, parent: QWidget = None):
         super().__init__(parent)
-        self.setWindowTitle("HYPRIL - Hyperspectral Image Viewer") # Changed title slightly
+        # Set window icon (company logo) before the window title so it appears in the titlebar/taskbar
+        self.setWindowTitle("HYPRIL - Hyperspectral Processing, Research and Innovation Lab") # Changed title slightly
+        try:
+            icon_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons", "April _ Azista - Copy.png"))
+            icon = QIcon(icon_path)
+            if not icon.isNull():
+                self.setWindowIcon(icon)
+                logging.info(f"Window icon set from: {icon_path}")
+            else:
+                logging.warning(f"Window icon not found at: {icon_path}")
+        except Exception as e:
+            logging.warning(f"Failed to set window icon: {e}")
+
+        
 
         # --- Initialize with an empty state ---
         self.layers = []  # Start with an empty list of layers
         self.active_layer_index = -1 
+        # Plugin infrastructure
+        self.loaded_plugins = {}  # name -> module
+        self.plugin_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "plugins"))
 
         # --- Keep track of the last opened file's path for convenience ---
         self.last_dir = os.path.expanduser("~") 
 
         # --- Interaction State ---
+        self._aoi_active = False
         self._is_panning = False
         self._pan_start = (0, 0)
         self._cur_xlim = None
@@ -238,6 +261,8 @@ class ImageViewerWindow(QMainWindow):
         self.pixel_info_window = None
         self.animation_window = None
         self.raster_analysis_window = None
+        self.child_viewer_windows = []
+        self.active_processor = None
 
         # Add these new attributes for viewport management
         self.viewport_cache = {}  # Cache rendered tiles
@@ -254,12 +279,11 @@ class ImageViewerWindow(QMainWindow):
         self._init_ui() # This will now build the UI on the central_widget
         self._connect_signals()
         self._center_window()
+        self._auto_load_plugins()  # Load all discovered plugins at startup
 
         # --- Initial display ---
         self._update_controls_for_mode()
         self._update_display() # This will initially show an empty canvas
-
-
     # ---------------- UI SETUP ----------------
     def _init_ui(self) -> None:
         try:
@@ -269,11 +293,49 @@ class ImageViewerWindow(QMainWindow):
 
             self.open_metadata_windows = {}
 
-
             # main_layout = QVBoxLayout(self)
             main_layout = QVBoxLayout(self.central_widget)
             main_layout.setContentsMargins(5, 5, 5, 5)
             main_layout.setSpacing(5)
+
+            # --- Create header with logo ---
+            header_layout = QHBoxLayout()
+            
+            # Add title label on the left
+            # title_label = QLabel("HYPRIL - Hyperspectral Processing, Research and Innovation Lab")
+            # title_font = title_label.font()
+            # title_font.setPointSize(8)
+            # title_font.setBold(True)
+            # title_label.setFont(title_font)
+            # header_layout.addWidget(title_label)
+            
+            # Add stretch to push logo to the right
+            header_layout.addStretch()
+            
+            # Add logo on the right
+            logo_path = "src/assets/icons/April _ Azista.png"
+            logo_label = QLabel()
+            try:
+                pixmap = QPixmap(logo_path)
+                if not pixmap.isNull():
+                    # Scale the logo to a reasonable size (height: 15px)
+                    scaled_pixmap = pixmap.scaledToHeight(18, Qt.SmoothTransformation)
+                    logo_label.setPixmap(scaled_pixmap)
+                    logo_label.setContentsMargins(0,0,20,0) # left, top, right, bottom
+                    logging.info(f"Logo loaded successfully from: {logo_path}")
+                else:
+                    logging.warning(f"Logo image not found or invalid at: {logo_path}")
+                    logo_label.setText("Logo")
+            except Exception as e:
+                logging.warning(f"Could not load logo: {str(e)}")
+                logo_label.setText("Logo")
+            
+            header_layout.addWidget(logo_label)
+            
+            # Add header to main layout
+            header_widget = QWidget()
+            header_widget.setLayout(header_layout)
+            main_layout.addWidget(header_widget)
 
             self.status_bar = QStatusBar(self)
             self.status_bar.showMessage("Ready" , 5000)
@@ -291,17 +353,15 @@ class ImageViewerWindow(QMainWindow):
             logging.error(f"UI initialization error: {str(e)}")
             QErrorMessage(self).showMessage(f"UI initialization error: {str(e)}")
 
-
-
-
     def _center_window(self) -> None:
-        self.resize(1200, 800)
-        screen_center = self.screen().availableGeometry().center()
-        frame_geom = self.frameGeometry()
-        frame_geom.moveCenter(screen_center)
-        self.move(frame_geom.topLeft())
-        logging.info("Window centered on screen.")
-
+        # Get available screen geometry (excluding taskbar/dock)
+        screen_geom = self.screen().availableGeometry()
+        
+        # Resize window to fill available screen area
+        self.setGeometry(screen_geom)
+        
+        # Log action
+        logging.info("Window resized to cover full available screen.")
 
     def _create_menu_bar(self, main_layout: QVBoxLayout) -> None:
         """Create and configure the menu bar."""
@@ -326,6 +386,14 @@ class ImageViewerWindow(QMainWindow):
             act_load.triggered.connect(self.load_image)
             file_menu.addAction(act_load)
 
+
+            # NEW: Open selected layer in a new window
+            act_open_new_win = QAction(QIcon("icons/new_window.png"), "Open Image in New Window", self)
+            act_open_new_win.setStatusTip("Open the selected layer in a separate viewer window")
+            act_open_new_win.triggered.connect(self.open_image_in_new_window)
+            file_menu.addAction(act_open_new_win)
+
+
             act_remove = QAction(QIcon("icons/remove.png"), "Remove Selected Layer", self)
             act_remove.setShortcut(QKeySequence.Delete)
             act_remove.setStatusTip("Remove the currently selected layer")
@@ -333,7 +401,7 @@ class ImageViewerWindow(QMainWindow):
             act_remove.triggered.connect(self.remove_selected_layer)
             file_menu.addAction(act_remove)
 
-            file_menu.addSeparator()
+            # file_menu.addSeparator()
 
             act_exit = QAction(QIcon("icons/exit.png"), "Exit", self)
             act_exit.setShortcut(QKeySequence("Ctrl+Q"))
@@ -348,6 +416,13 @@ class ImageViewerWindow(QMainWindow):
             tools_menu = QMenu("Tools", self.menu_bar)
             tools_menu.setAccessibleName("Tools Menu")
 
+            act_draw_aoi = QAction(QIcon("icons/select_rect.png"), "Draw AOI (Clip)...", self)
+            act_draw_aoi.setStatusTip("Draw an AOI on the active layer and clip to it")
+            act_draw_aoi.triggered.connect(self._start_aoi_selection)
+            file_menu.addAction(act_draw_aoi)
+
+
+
 
             #Raster Analysis submenu
             raster_analysis_menu = QMenu("Raster Analysis", self)
@@ -359,10 +434,6 @@ class ImageViewerWindow(QMainWindow):
             act_raster_analysis.triggered.connect(self._raster_analysis)
             raster_analysis_menu.addAction(act_raster_analysis)
 
-#
-
-
-
 
             #Raster Analysis submenu
             End_Member_Menu = QMenu("End Member Extractor", self)
@@ -373,11 +444,6 @@ class ImageViewerWindow(QMainWindow):
             act_PPI.setStatusTip("Calculate PPI on the loaded image")
             act_PPI.triggered.connect(self._PPI_Calculator)
             End_Member_Menu.addAction(act_PPI)
-
-
-
-
-
 
 
             #Spectral plotting
@@ -421,10 +487,38 @@ class ImageViewerWindow(QMainWindow):
             tools_menu.addMenu(spectral_plotting_menu)
             tools_menu.addMenu(raster_analysis_menu)
             tools_menu.addMenu(End_Member_Menu)
+            # tools_menu.addMenu()
 
             main_layout.addWidget(self.menu_bar)
             self.menu_bar.addMenu(file_menu)
             self.menu_bar.addMenu(tools_menu)
+
+
+            # --- Plugins menu (discover & load external plugins) ---
+            try:
+                plugins_menu = QMenu("Plugins", self.menu_bar)
+                plugins_menu.setAccessibleName("Plugins Menu")
+
+                install_action = QAction("Install Plugin from File...", self)
+                install_action.setStatusTip("Install a plugin from a Python file")
+                install_action.triggered.connect(lambda: self._install_plugin_dialog())
+                plugins_menu.addAction(install_action)
+                plugins_menu.addSeparator()
+
+                # Discover local plugins folder and add entries
+                discovered = self._discover_plugins()
+                for p in discovered:
+                    name = os.path.splitext(os.path.basename(p))[0]
+                    act = QAction(name, self)
+                    act.setStatusTip(f"Load plugin: {name}")
+                    act.triggered.connect(lambda checked=False, path=p: self._load_plugin_from_path(path))
+                    plugins_menu.addAction(act)
+                self.menu_bar.addMenu(plugins_menu)
+
+                
+                logging.info(f"Plugins menu created. Found {len(discovered)} plugin(s).")
+            except Exception as e:
+                logging.warning(f"Failed to create Plugins menu: {e}")
             logging.info("Menu bar created successfully.")
 
 
@@ -432,7 +526,6 @@ class ImageViewerWindow(QMainWindow):
             logging.error(f"Error creating menu bar: {str(e)}")
             self.status_bar.showMessage(f"Menu bar creation error: {str(e)}")
             raise
-
 
     def refresh_display(self):
         """
@@ -462,6 +555,114 @@ class ImageViewerWindow(QMainWindow):
         self._update_display() 
 
         self.status_bar.showMessage("Workspace Cleared. Ready to load new image.", 3000)
+
+    # ---------------- PLUGIN INFRASTRUCTURE ----------------
+    def _discover_plugins(self) -> list:
+        """Return list of .py plugin file paths in the configured plugins folder."""
+        try:
+            if not os.path.isdir(self.plugin_dir):
+                logging.info(f"Plugin directory does not exist: {self.plugin_dir}")
+                return []
+            pattern = os.path.join(self.plugin_dir, "*.py")
+            files = sorted(glob.glob(pattern))
+            logging.info(f"Discovered plugin files: {files}")
+            return files
+        except Exception as e:
+            logging.error(f"Error discovering plugins: {e}")
+            return []
+
+    def _install_plugin_dialog(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Select plugin file", "", "Python Files (*.py)")
+        if not path:
+            return
+        try:
+            self._load_plugin_from_path(path)
+        except Exception as e:
+            logging.error(f"Failed to install plugin from {path}: {e}")
+            QErrorMessage(self).showMessage(f"Failed to install plugin: {e}")
+
+    def _load_plugin_from_path(self, path: str):
+        """Dynamically load a plugin module from a filesystem path.
+
+        Expected plugin entry point: a callable `register(window)` function which
+        receives the `ImageViewerWindow` instance and can add actions/widgets.
+        """
+        try:
+            name = os.path.splitext(os.path.basename(path))[0]
+            unique_name = f"hypril_plugin_{name}_{abs(hash(path))}"
+            if unique_name in sys.modules:
+                module = sys.modules[unique_name]
+                logging.info(f"Plugin module already loaded: {unique_name}")
+            else:
+                spec = importlib.util.spec_from_file_location(unique_name, path)
+                if spec is None or spec.loader is None:
+                    raise ImportError(f"Cannot load plugin spec for {path}")
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                sys.modules[unique_name] = module
+                logging.info(f"Plugin module loaded: {unique_name}")
+
+            # Call register if present
+            if hasattr(module, 'register') and callable(module.register):
+                try:
+                    module.register(self)
+                    self.loaded_plugins[name] = module
+                    logging.info(f"Plugin '{name}' registered successfully.")
+                    QMessageBox.information(self, "Plugin Installed", f"Plugin '{name}' installed and registered.")
+                except Exception as e:
+                    logging.error(f"Error while registering plugin '{name}': {e}", exc_info=True)
+                    QErrorMessage(self).showMessage(f"Plugin '{name}' failed during register(): {e}")
+            else:
+                logging.warning(f"Plugin '{name}' does not expose a register(window) function.")
+                QMessageBox.information(self, "Plugin Loaded", f"Plugin '{name}' loaded but no register(window) found.")
+        except Exception as e:
+            logging.error(f"Failed to load plugin from {path}: {e}", exc_info=True)
+            QErrorMessage(self).showMessage(f"Failed to load plugin: {e}")
+
+    def _auto_load_plugins(self):
+        """Automatically discover and load all plugins from the plugins folder at startup.
+        
+        Unlike _load_plugin_from_path, this does NOT show message boxes; it just logs results.
+        """
+        discovered = self._discover_plugins()
+        if not discovered:
+            logging.info("No plugins to auto-load.")
+            return
+
+        logging.info(f"Auto-loading {len(discovered)} plugin(s)...")
+        for path in discovered:
+            try:
+                name = os.path.splitext(os.path.basename(path))[0]
+                unique_name = f"hypril_plugin_{name}_{abs(hash(path))}"
+                
+                if unique_name in sys.modules:
+                    module = sys.modules[unique_name]
+                    logging.info(f"Plugin '{name}' already loaded.")
+                else:
+                    spec = importlib.util.spec_from_file_location(unique_name, path)
+                    if spec is None or spec.loader is None:
+                        logging.warning(f"Cannot load plugin spec for {path}")
+                        continue
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    sys.modules[unique_name] = module
+                    logging.info(f"Plugin module loaded: {unique_name}")
+
+                # Call register if present
+                if hasattr(module, 'register') and callable(module.register):
+                    try:
+                        module.register(self)
+                        self.loaded_plugins[name] = module
+                        logging.info(f"✓ Plugin '{name}' auto-loaded and registered.")
+                    except Exception as e:
+                        logging.error(f"Error registering plugin '{name}': {e}", exc_info=True)
+                else:
+                    logging.warning(f"Plugin '{name}' has no register(window) function; skipping.")
+
+            except Exception as e:
+                logging.error(f"Failed to auto-load plugin from {path}: {e}", exc_info=True)
+
+        logging.info(f"Auto-load complete. Loaded {len(self.loaded_plugins)} plugin(s).")
 
     def plot_spectral_profile(self):
         # Plot spectral library
@@ -542,48 +743,150 @@ class ImageViewerWindow(QMainWindow):
         return control_widget
 
     def _create_image_panel(self) -> QWidget:
-        """Creates the panel for displaying the hyperspectral image."""
-        
-        # 1. Use a QFrame as the main container for styling
-        # A QFrame is perfect for creating visible borders and backgrounds.
+        """Creates a robust PySide6 panel for displaying hyperspectral images."""
+
+        # 1. Frame setup with styling
         image_frame = QFrame()
+        image_frame.setObjectName("HyperspectralImagePanel")
         image_frame.setStyleSheet("""
-            QFrame {
+            QFrame#HyperspectralImagePanel {
                 border: 2px solid #555;
                 border-radius: 8px;
-                background-color: #f0f0f0; /* A light grey background */
+                background-color: #f0f0f0;
             }
         """)
-        
-        # Use a layout for the frame itself
         frame_layout = QVBoxLayout(image_frame)
-        frame_layout.setContentsMargins(5, 5, 5, 5) # Add a little padding inside the frame
+        frame_layout.setContentsMargins(5, 5, 5, 5)
 
-        # 2. Create the Matplotlib figure and canvas
+        # 2. Matplotlib figure and canvas
         self.figure, self.ax = plt.subplots()
-        self.figure.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=0, hspace=0)
+        self.figure.subplots_adjust(left=0, right=1, top=1, bottom=0)
         self.ax.axis('off')
-        self.figure.subplots_adjust(left=0, right=1, top=1, bottom=0) # Remove plot margins
-        
         self.canvas = FigureCanvas(self.figure)
         self.canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.canvas.setStyleSheet("border: 3px solid #444; border-radius: 5px;")
 
-        # Connect mouse events for interactivity
+        # 3. Toolbar
+        self.toolbar = NavigationToolbar(self.canvas, image_frame)
+
+        # 4. Status bar for feedback/user hints
+        self.statusbar = QStatusBar(image_frame)
+        self.statusbar.setSizeGripEnabled(False)
+        self.statusbar.showMessage("Ready")
+
+        # 5. Layout widgets
+        frame_layout.addWidget(self.toolbar)
+        frame_layout.addWidget(self.canvas)
+        frame_layout.addWidget(self.statusbar)
+
         self.canvas.mpl_connect("button_press_event", self._on_mouse_press)
         self.canvas.mpl_connect("button_release_event", self._on_mouse_release)
         self.canvas.mpl_connect("motion_notify_event", self._on_mouse_move)
 
-        # 3. Create the toolbar
-        self.toolbar = NavigationToolbar(self.canvas, image_frame) # Parent is the frame
+        # 7. Optional: expose figure/canvas/ax/statusbar for outside use
+        image_frame.figure = self.figure
+        image_frame.ax = self.ax
+        image_frame.canvas = self.canvas
+        image_frame.statusbar = self.statusbar
 
-        # 4. Add the toolbar and canvas to the frame's layout
-        frame_layout.addWidget(self.toolbar)
-        frame_layout.addWidget(self.canvas)
+        # 8. Logging and return
         logging.info("Image panel created successfully.")
-        
-        # Return the styled QFrame, which is now the main panel widget
         return image_frame
+
+    def _start_aoi_selection(self):
+        if not (0 <= self.active_layer_index < len(self.layers)):
+            QErrorMessage(self).showMessage("No layer selected.")
+            return
+
+        # Disable existing pan/zoom while AOI is active
+        self._aoi_active = True
+        self.status_bar.showMessage("AOI mode: drag a rectangle on the image to clip; release to finish.", 0)
+
+        # Create and start selector
+        self._aoi_selector = AOISelector(self.ax, self.canvas, parent=self)
+        self._aoi_selector.finished.connect(self._on_aoi_finished)
+        self._aoi_selector.start()
+
+
+    def _on_aoi_finished(self, bounds):
+        # Re-enable pan/zoom
+        self._aoi_active = False
+        self.status_bar.showMessage("AOI selection complete.", 3000)
+
+        try:
+            x1, y1, x2, y2 = bounds
+            if x2 <= x1 or y2 <= y1:
+                QErrorMessage(self).showMessage("Invalid AOI: zero or negative area.")
+                return
+
+            # Clamp to image bounds
+            active = self.layers[self.active_layer_index]
+            data = active["data"]
+            h, w = data.shape[:2]
+            xi1 = max(0, min(w - 1, x1))
+            xi2 = max(0, min(w - 1, x2))
+            yi1 = max(0, min(h - 1, y1))
+            yi2 = max(0, min(h - 1, y2))
+
+            # Inclusive → exclusive slice
+            xs, xe = xi1, xi2 + 1
+            ys, ye = yi1, yi2 + 1
+
+            clipped = data[ys:ye, xs:xe, :] if data.ndim == 3 else data[ys:ye, xs:xe]
+
+            # Compute new geotransform from parent if present
+            gt = active.get("geotransform")
+            proj = active.get("projection")
+            new_gt = None
+            if gt:
+                # General affine adjustment for offset by (xs, ys)
+                gt0, gt1, gt2, gt3, gt4, gt5 = gt
+                new_gt0 = gt0 + xs * gt1 + ys * gt2
+                new_gt3 = gt3 + xs * gt4 + ys * gt5
+                new_gt = (new_gt0, gt1, gt2, new_gt3, gt4, gt5)
+
+            # Build new layer with propagated metadata
+            layer_name = active.get("name", "Layer")
+            band_names = active.get("band_names", [])
+            new_band_names = band_names if (clipped.ndim == 3 and clipped.shape[2] == len(band_names)) else \
+                            ([band_names[0]] if (clipped.ndim == 2 and band_names) else
+                            [f"Band {i+1}" for i in range(clipped.shape[2])] if clipped.ndim == 3 else ["Band 1"])
+
+
+
+
+            new_layer = {
+                "name": f"AOI Clip - {layer_name}",
+                "data": clipped.astype(data.dtype, copy=False),
+                "band_names": new_band_names,
+                "metadata": active.get("metadata", {}).copy(),
+                "geotransform": new_gt,
+                "projection": proj,
+                "visible": True
+            }
+            new_width, new_height = clipped.shape[1], clipped.shape[0]
+            new_layer["metadata"]["RasterXSize"] = new_width
+            new_layer["metadata"]["RasterYSize"] = new_height
+
+            # Also carry wavelengths if present on layer or on viewer
+            wl = active.get("wavelengths", getattr(self, "wavelengths", []))
+            wl_units = active.get("wavelength_units", getattr(self, "wavelength_units", "nm"))
+            if wl:
+                new_layer["wavelengths"] = wl
+                new_layer["wavelength_units"] = wl_units
+
+            self.layers.insert(0, new_layer)
+            self._refresh_layer_list()
+            self.layer_list.setCurrentRow(0)
+            self._update_band_combos_for_active_layer()
+            self._update_display()
+            self.fit_image_to_display()
+            QMessageBox.information(self, "AOI Clip", f"Created layer '{new_layer['name']}'")
+
+        except Exception as e:
+            QErrorMessage(self).showMessage(f"AOI clip failed: {e}")
+
+
 
 
 
@@ -603,8 +906,6 @@ class ImageViewerWindow(QMainWindow):
         self.ax.autoscale(enable=True, axis='both', tight=True)
         self.canvas.draw_idle()
 
-
-
     # ---------------- SIGNALS ----------------
 
     def _connect_signals(self) -> None:
@@ -618,8 +919,6 @@ class ImageViewerWindow(QMainWindow):
         self.b_combo.currentIndexChanged.connect(self._update_display)
 
         # Canvas interactions
-        # self.canvas.mpl_connect('button_press_event', self._on_image_click)
-
         self.canvas.mpl_connect('button_press_event', self._on_mouse_press_For_plot)
         self.canvas.mpl_connect('button_release_event', self._on_mouse_release_For_plot)
         self.canvas.mpl_connect('scroll_event', self._on_scroll_zoom)
@@ -631,7 +930,6 @@ class ImageViewerWindow(QMainWindow):
         self.layer_list.layerrightclicked.connect(self._show_layer_context_menu)
 
         logging.info("Signals connected successfully.")
-
 
     def _show_layer_context_menu(self, row: int):
         layer = self.layers[row]
@@ -651,7 +949,106 @@ class ImageViewerWindow(QMainWindow):
         remove_layer_action.triggered.connect(lambda: self._remove_layer_by_index(row))
         menu.addAction(remove_layer_action)
 
+        properties_action = QAction("Properties", self)
+        properties_action.triggered.connect(lambda: self._show_layer_properties(layer))
+        menu.addAction(properties_action)
+
         menu.exec(self.layer_list.mapToGlobal(self.layer_list.visualItemRect(self.layer_list.item(row)).bottomLeft()))
+
+    def _show_layer_properties(self, layer: dict):
+        """
+        Displays a properties dialog for a layer, similar to QGIS.
+        Includes:
+        - General tab: metadata table
+        - NoData tab: set image no-data value
+        """
+        from PySide6.QtWidgets import (
+            QDialog, QVBoxLayout, QTabWidget, QWidget, QTableWidget, QTableWidgetItem,
+            QAbstractItemView, QHeaderView, QHBoxLayout, QLabel, QDoubleSpinBox, QPushButton, QMessageBox
+        )
+
+        layer_name = layer.get("name", "Unknown Layer")
+        metadata = layer.get("metadata", {})
+
+        # Create main dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Properties - {layer_name}")
+        dialog.setMinimumSize(500, 400)
+
+        main_layout = QVBoxLayout(dialog)
+        tabs = QTabWidget()
+        main_layout.addWidget(tabs)
+
+        # -------------------------------
+        # TAB 1: GENERAL (metadata table)
+        # -------------------------------
+        general_tab = QWidget()
+        general_layout = QVBoxLayout(general_tab)
+
+        table = QTableWidget()
+        table.setColumnCount(2)
+        table.setHorizontalHeaderLabels(["Property", "Value"])
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+
+        if metadata:
+            table.setRowCount(len(metadata))
+            for row, (key, value) in enumerate(metadata.items()):
+                table.setItem(row, 0, QTableWidgetItem(str(key)))
+                table.setItem(row, 1, QTableWidgetItem(str(value)))
+        else:
+            table.setRowCount(1)
+            table.setItem(0, 0, QTableWidgetItem("No metadata"))
+            table.setItem(0, 1, QTableWidgetItem(""))
+
+        general_layout.addWidget(table)
+        tabs.addTab(general_tab, "General")
+
+        # -------------------------------
+        # TAB 2: NODATA SETTINGS
+        # -------------------------------
+        nodata_tab = QWidget()
+        nodata_layout = QVBoxLayout(nodata_tab)
+
+        nodata_label = QLabel("Set NoData value (pixels with this value will be treated as empty):")
+        nodata_spin = QDoubleSpinBox()
+        nodata_spin.setRange(-1e9, 1e9)
+        nodata_spin.setDecimals(4)
+        nodata_spin.setValue(float(metadata.get("NoData", 0)))  # Default 0 if not present
+
+        apply_btn = QPushButton("Apply NoData Value")
+
+        # Function to apply no-data change
+        def apply_nodata_value():
+            nodata_value = nodata_spin.value()
+            metadata["NoData"] = nodata_value
+            layer["metadata"] = metadata  # update layer dict
+
+            # Optional: if layer has actual numpy data, replace NaN with 0 or similar
+            if "data" in layer:
+                import numpy as np
+                data = layer["data"]
+                if isinstance(data, np.ndarray):
+                    data[np.isnan(data)] = nodata_value
+                    layer["data"] = data
+
+            QMessageBox.information(dialog, "NoData Updated", f"NoData value set to {nodata_value}")
+            self._update_display()  # Refresh display to reflect changes
+
+        apply_btn.clicked.connect(apply_nodata_value)
+
+        nodata_layout.addWidget(nodata_label)
+        nodata_layout.addWidget(nodata_spin)
+        nodata_layout.addWidget(apply_btn)
+        nodata_layout.addStretch()
+
+        tabs.addTab(nodata_tab, "NoData")
+
+
+        dialog.exec()
 
 
     def _view_layer_metadata(self, layer: dict):
@@ -661,7 +1058,6 @@ class ImageViewerWindow(QMainWindow):
         """
         layer_name = layer.get("name", "Unknown Layer")
         metadata = layer.get("metadata", {}).copy() # Use a copy to avoid modifying original
-        # print("Displaying metadata for layer:", layer_name , "With metadata:", metadata)
 
         # --- If a window for this layer is already open, just bring it to the front ---
         if layer_name in self.open_metadata_windows:
@@ -719,7 +1115,7 @@ class ImageViewerWindow(QMainWindow):
             print("layer_data name:", layer_data.get("name", "Unknown"))
             md = layer_data.get("metadata", {})
             # wavelengths = self._parse_wavelengths(md)
-            wavelengths = md.get("wavelength", [])
+            wavelengths = md.get('Wavelengths', [])
             # print("Wavelengths:", wavelengths)
             if isinstance(wavelengths, str):
                 wavelengths = wavelengths.strip("{} \n")
@@ -756,9 +1152,9 @@ class ImageViewerWindow(QMainWindow):
                 wl = f"{wavelengths[i]}" if i < len(wavelengths) else "N/A"
                 table.setItem(i, 2, QTableWidgetItem(wl))
                 # --- NEW: Populate Min/Max Value columns ---
-                min_val_str = f"{min_values[i]:.4f}"
+                min_val_str = f"{min_values[i]:.2f}"
                 table.setItem(i, 3, QTableWidgetItem(min_val_str))
-                max_val_str = f"{max_values[i]:.4f}"
+                max_val_str = f"{max_values[i]:.2f}"
                 table.setItem(i, 4, QTableWidgetItem(max_val_str))
             
             table.resizeColumnsToContents()
@@ -834,18 +1230,6 @@ class ImageViewerWindow(QMainWindow):
         
         dialog.show()
    
-
-
-
-
-
-#
-    # def _export_layer(self, layer):
-    #     file_path, _ = QFileDialog.getSaveFileName(self, "Export Layer", f"{layer['name']}.npy", "NumPy Files (*.npy)")
-    #     if file_path:
-    #         np.save(file_path, layer["data"])
-    #         self.status_bar.showMessage(f"Layer '{layer['name']}' exported to {file_path}", 3000)
-
     def _export_layer(self, layer):
         """Export layer to GeoTIFF format with professional options"""
         export_dialog = TiffExportDialog(layer, parent=self)
@@ -996,7 +1380,6 @@ class ImageViewerWindow(QMainWindow):
         self.layer_list.setCurrentRow(row)
         self.remove_selected_layer()
 
-
     def _on_mouse_press_For_plot(self, event):
         if event.inaxes == self.ax and event.button == 1:  # Left click
             self._press_pos = (event.x, event.y)
@@ -1011,30 +1394,32 @@ class ImageViewerWindow(QMainWindow):
             self._press_pos = None
 
 
-
-
-
     # ---------------- MENU ACTIONS ----------------
 
 
     def load_image(self):
         """Load a hyperspectral image using the HyperspectralImageLoader."""
-
+        logging.info("="*80)
+        logging.info("START: User initiated Load Image operation")
+        logging.info("="*80)
 
         # loaders = HyperspectralImageLoader.open_file_dialog(parent=self)
         self.statusBar().showMessage("Opening file dialog...", 2000)
+        logging.info("Opening file dialog for user to select image file(s)...")
         loaders = HyperspectralImageLoader.open_file_dialog(parent=self)
         self.statusBar().showMessage("Loading hyperspectral data... Please wait for large files.", 0)
 
-
-
         if loaders is None:
+            logging.warning("Image loading cancelled by user.")
             self.statusBar().showMessage("Image loading cancelled.", 5000)
             return
         try:
             for i, loader in enumerate(loaders):
                 if loader and loader.is_loaded:
-                    self.statusBar().showMessage(f"Processing dataset {i+1}/{len(loaders)}...", 0)
+                    # self.statusBar().showMessage(f"Processing dataset {i+1}/{len(loaders)}...", 0)
+                    logging.info(f"---\nProcessing file {i+1}/{len(loaders)}")
+                    logging.info(f"File path: {loader.file_path}")
+                    
                     # Assign the loaded data from the loader object's attributes
                     self.image_data = loader.image_data
                     self.band_names = loader.band_names
@@ -1060,20 +1445,31 @@ class ImageViewerWindow(QMainWindow):
                     }
                     # Add the complete dictionary to the layers list
                     self.layers.insert(0, new_layer)
+                    logging.info(f"Layer added to layer list: '{self.file_name}'")
 
-                    print("Loaded image shape:", self.image_data.shape)
                     self._refresh_layer_list()
+                    logging.info(f"Layer list refreshed. Total layers: {len(self.layers)}")
+                    
                     # Make the new layer active
                     # self.layer_list.setCurrentRow(0)
                     self._update_band_combos_for_active_layer()
+                    logging.info(f"Band combos updated for active layer")
+                    
                     self._update_display()
+                    logging.info(f"Display updated")
+                    
             if loaders:
                 QTimer.singleShot(100, self.fit_image_to_display)
-            logging.info(f"Loaded image: {loader.file_path} with shape {self.image_data.shape}")
+                logging.info(f"Image fit to display scheduled")
+            
+            logging.info("="*80)
+            logging.info(f"COMPLETED: Successfully loaded {len([l for l in loaders if l and l.is_loaded])} image(s)")
+            logging.info("="*80)
 
         except Exception as e:
+            logging.error(f"ERROR during image loading: {str(e)}", exc_info=True)
+            logging.error("="*80)
             QErrorMessage(self).showMessage(f"Error loading image: {e}")
-
 
     def animate_bands(self):
         """Launches the animation viewer for the currently selected layer."""
@@ -1098,8 +1494,44 @@ class ImageViewerWindow(QMainWindow):
         )
         self.animation_window.show()
 
+    def open_image_in_new_window(self):
+            """Open the currently selected layer in a separate ImageViewerWindow instance."""
+            idx = self.layer_list.currentRow()
+            if idx < 0 or idx >= len(self.layers):
+                QErrorMessage(self).showMessage("No layer selected.")
+                return
+
+            layer = self.layers[idx]
+            try:
+                # Create a new top-level viewer window
+                new_win = ImageViewerWindow(parent=None)
+
+                # Create a shallow copy of data to avoid accidental shared-state modifications.
+                data_copy = layer["data"].copy()
+
+                # Add as a new layer in the new window and copy metadata/geo
+                new_win.add_layer(data_copy, name=f"{layer.get('name','Layer')}")
+                # carry over metadata and spatial info if present
+                new_win.layers[0].update({
+                    "metadata": layer.get("metadata", {}).copy(),
+                    "geotransform": layer.get("geotransform"),
+                    "projection": layer.get("projection"),
+                    "band_names": layer.get("band_names", new_win.layers[0].get("band_names", []))
+                })
+                new_win._refresh_layer_list()
+                new_win.layer_list.setCurrentRow(0)
+                new_win._update_band_combos_for_active_layer()
+                new_win._update_display()
+
+                # new_win.show()
+
+                self.child_viewer_windows.append(new_win)  # Keep a reference to prevent garbage collection
+                new_win.destroyed.connect(lambda _, w=new_win: self.child_viewer_windows.remove(w) if w in self.child_viewer_windows else None)
+                new_win.show()
 
 
+            except Exception as e:
+                QErrorMessage(self).showMessage(f"Could not open image in new window: {e}")
 
     def remove_selected_layer(self):
         """Removes the selected layer from the list."""
@@ -1107,13 +1539,21 @@ class ImageViewerWindow(QMainWindow):
         selected_row = self.layer_list.currentRow()
         if selected_row < 0:
             # Nothing is selected, so do nothing.
+            logging.warning("Remove layer requested but no layer is selected")
             return
+
+        logging.info("="*80)
+        logging.info(f"START: Removing layer at index {selected_row}")
+        removed_layer_name = self.layers[selected_row]["name"] if selected_row < len(self.layers) else "Unknown"
+        logging.info(f"Layer name: '{removed_layer_name}'")
 
         # 2. Remove the layer from the data model first
         del self.layers[selected_row]
+        logging.info(f"Layer removed from data model. Remaining layers: {len(self.layers)}")
         
         # 3. Refresh the UI list widget
         self._refresh_layer_list() # This will remove the item from the visual list
+        logging.info(f"Layer list UI refreshed")
 
         # 4. Handle the new application state (either items remain or it's empty)
         if self.layers:
@@ -1123,13 +1563,16 @@ class ImageViewerWindow(QMainWindow):
             new_index = min(selected_row, len(self.layers) - 1)
             self.active_layer_index = new_index
             self.layer_list.setCurrentRow(new_index)
+            logging.info(f"New active layer set to index {new_index}: '{self.layers[new_index]['name']}'")
             
             # Update UI components for the newly selected layer
             self._update_band_combos_for_active_layer()
             self._update_display()
+            logging.info(f"Display and controls updated for new active layer")
         else:
             # --- No layers are left, so clear everything ---
             self.active_layer_index = -1
+            logging.info(f"No layers remaining. Display cleared")
             
             # Clear any UI components that depend on a layer
             # For example, clear the band dropdowns and the main image view
@@ -1231,8 +1674,6 @@ class ImageViewerWindow(QMainWindow):
         clipped = np.clip(band_float, p_low, p_high)
         return (clipped - p_low) / (p_high - p_low)
 
-
-
     def _render_layer_image(self, layer) -> np.ndarray:
         """Return an HxWx3 (RGB) or HxW array normalized for display based on current mode & active layer combos."""
         data = layer["data"]
@@ -1273,6 +1714,23 @@ class ImageViewerWindow(QMainWindow):
 
     def _update_display(self) -> None:
         try:
+            # Preserve any existing viewport extent (limits) so we don't reset them
+            try:
+                prev_xlim = self.ax.get_xlim()
+                prev_ylim = self.ax.get_ylim()
+            except Exception:
+                prev_xlim, prev_ylim = None, None
+
+            # Consider prev limits meaningful if they are not matplotlib's default (0.0, 1.0)
+            use_prev_extent = False
+            if prev_xlim is not None and prev_ylim is not None:
+                try:
+                    if not (np.allclose(prev_xlim, (0.0, 1.0)) and np.allclose(prev_ylim, (0.0, 1.0))):
+                        use_prev_extent = True
+                except Exception:
+                    use_prev_extent = True
+
+            # Now clear the axes to redraw, but we will restore limits below when appropriate
             self.ax.clear()
             #debug
             print("Updating display with layers:", [lyr["name"] for lyr in self.layers])
@@ -1295,32 +1753,45 @@ class ImageViewerWindow(QMainWindow):
                 if img is None:
                     logging.warning(f"Layer '{layer.get('name', 'Unknown')}' returned no image")
                     continue
+                img_h, img_w = img.shape[:2]
+                
 
                 if img.ndim == 2:
-                    self.ax.imshow(img, cmap='gray', alpha=1.0, interpolation='nearest', aspect='auto')
-                    self.ax.set_xlim(0, img.shape[1])
-                    self.ax.set_ylim(img.shape[0], 0)
-                    self.ax.axis('off')
-                    self.ax.autoscale('off')
+                    logging.info(f"Displaying grayscale image of shape {img.shape}")
+                    self.ax.imshow(img, cmap='gray', alpha=1.0, interpolation='nearest')#, aspect='auto')
+                elif img.ndim == 3 and img.shape[2] in (3, 4):
+                    logging.info(f"Displaying RGB image of shape {img.shape}")
+                    self.ax.imshow(img, alpha=1.0, interpolation='nearest')#, aspect='auto')
 
-                elif img.ndim == 3 and img.shape[2] in (3, 4):  # RGB or RGBA
-                    self.ax.imshow(img, alpha=1.0, interpolation='nearest', aspect='auto')
-                    self.ax.set_xlim(0, img.shape[1])
-                    self.ax.set_ylim(img.shape[0], 0)
-                    self.ax.axis('off')
-                    self.ax.autoscale('off')
+                # Defer setting extent until after all layers are drawn. We don't
+                # want to override user panning/zooming if an extent already exists.
+                self.ax.axis('off')
+                self.ax.autoscale(False)
 
+            # Restore previous extent (if it was meaningful) instead of forcing
+            # the axes to canvas-size on every update. This preserves panning/zoom
+            # performed by the user or programmatically set limits.
+            try:
+                if use_prev_extent and prev_xlim is not None and prev_ylim is not None:
+                    self.ax.set_xlim(prev_xlim)
+                    self.ax.set_ylim(prev_ylim)
                 else:
-                    logging.warning(f"Unsupported image shape: {img.shape}")
-                    continue
+                    canva_x_lmit, canva_y_lmit = self.canvas.get_width_height()
+                    self.ax.set_xlim(0, canva_x_lmit)
+                    self.ax.set_ylim(canva_y_lmit, 0)
+            except Exception:
+                # If restoring limits fails for any reason, ignore and continue
+                pass
 
-            self.ax.axis('off')
             self.canvas.draw_idle()
             self.status_bar.showMessage("Display updated", 2000)
 
         except Exception as e:
             logging.error(f"Error updating display: {str(e)}", exc_info=True)
             self.status_bar.showMessage(f"Display update error: {str(e)}", 5000)
+
+    # ---------------- INTERACTIONS ----------------
+
 
     # This new version finds the topmost visible layer before getting pixel data.
     def _on_image_click(self, event) -> None:
@@ -1376,22 +1847,8 @@ class ImageViewerWindow(QMainWindow):
             QErrorMessage(self).showMessage(f"Error retrieving pixel info: {e}")
 
 
-    def set_performance_mode(self, enabled=True):
-        """Toggle performance optimizations for large datasets"""
-        if enabled:
-            # Use faster drawing backend
-            self.canvas.draw = self.canvas.draw_idle
-            # Reduce animation frames
-            self.canvas.toolbar.pan()  # Enable pan mode by default
-            # Set reasonable limits for viewport rendering
-            self.base_resolution = 1024  # Smaller for better performance
-        else:
-            self.base_resolution = 2048  # Higher quality
-
-
-
     def _on_scroll_zoom(self, event) -> None:
-        if event.xdata is None or event.ydata is None:
+        if self._aoi_active or event.xdata is None or event.ydata is None:
             return
         scale_factor = 1 / ZOOM_FACTOR if event.button == 'up' else ZOOM_FACTOR
         cur_xlim = self.ax.get_xlim()
@@ -1406,7 +1863,9 @@ class ImageViewerWindow(QMainWindow):
         self.canvas.draw_idle()
 
     def _on_mouse_press(self, event):
-        if event.inaxes != self.ax:
+        
+
+        if self._aoi_active or event.inaxes != self.ax:
             return
         if event.button in [1, 2, 3]:
             self._is_panning = True
@@ -1433,15 +1892,33 @@ class ImageViewerWindow(QMainWindow):
         """Ensure child windows are closed when this window is closed."""
         if self.pixel_info_window:
             self.pixel_info_window.close()
-        if self.animation_window: # <-- ADD THIS IF-BLOCK
+        if self.animation_window: 
             self.animation_window.close()
         if self.active_processor and self.active_processor.mnf_viewer_window:
             self.active_processor.mnf_viewer_window.close()
+        # Close any externally opened image viewer windows kept to prevent GC
+        for w in list(getattr(self, "child_viewer_windows", [])):
+            try:
+                w.close()
+            except Exception:
+                pass
+
+        # Safely close MNF viewer if present
+        if getattr(self, "active_processor", None) and getattr(self.active_processor, "mnf_viewer_window", None):
+            try:
+                self.active_processor.mnf_viewer_window.close()
+            except Exception:
+                pass
+
         super().closeEvent(event)
 
 
     def add_layer(self, image_data, name="New Layer"):
         """A helper method to add a new layer programmatically."""
+        logging.info("="*80)
+        logging.info(f"START: Adding new layer - '{name}'")
+        logging.info(f"Image shape: {image_data.shape}")
+        
         band_names = [f"Band {i+1}" for i in range(image_data.shape[2])]
         new_layer = {
             "name": name,
@@ -1450,13 +1927,19 @@ class ImageViewerWindow(QMainWindow):
             "band_names": band_names
         }
         self.layers.insert(0, new_layer) # Add to the top
+        logging.info(f"Layer '{name}' inserted at position 0 (top)")
+        logging.info(f"Total layers now: {len(self.layers)}")
+        
         self._refresh_layer_list()
+        logging.info(f"Layer list refreshed")
+        
         self.layer_list.setCurrentRow(0) # Make it the active layer
+        logging.info(f"Layer '{name}' set as active layer")
+        logging.info(f"COMPLETED: New layer '{name}' added successfully")
+        logging.info("="*80)
 
 
     def Bad_Band_Removal(self):
-
-
         print("Bad Band Removal clicked")
 
     def PCA(self):
@@ -1466,35 +1949,61 @@ class ImageViewerWindow(QMainWindow):
         print("ICA clicked")
 
     def MNF(self):
+        logging.info("="*80)
+        logging.info("START: MNF (Minimum Noise Fraction) processing initiated")
+        
         try:
-
+            if not (0 <= self.active_layer_index < len(self.layers)):
+                logging.warning("MNF requested but no layer is active")
+                QErrorMessage(self).showMessage("No layer selected. Please select a layer first.")
+                return
+            
             active_layer_data = self.layers[self.active_layer_index]["data"]
+            active_layer_name = self.layers[self.active_layer_index]["name"]
+            logging.info(f"Active layer: '{active_layer_name}'")
+            logging.info(f"Layer shape: {active_layer_data.shape}")
+            
             # Pass the data and a reference to the viewer window itself
-            processor = MNFProcessor(active_layer_data)
+            processor = MNFProcessor(active_layer_data, active_layer_name)
+            logging.info("MNFProcessor created successfully")
+            
             processor.display_interactive_mnf(parent_viewer=self)
+            logging.info("Interactive MNF window displayed")
 
             # Note: We keep the processor in memory to keep the window alive
             # A more advanced solution might store it in a list of active processors
             self.active_processor = processor
+            logging.info("COMPLETED: MNF processing window opened")
+            logging.info("="*80)
 
         except Exception as e:
+            logging.error(f"ERROR in MNF processing: {str(e)}", exc_info=True)
+            logging.error("="*80)
             QErrorMessage(self).showMessage(f"MNF error: {e}")
 
-
-
-
     def _raster_analysis(self):
-        print("Raster Analysis clicked")
+        logging.info("="*80)
+        logging.info("START: Raster Analysis (Calculator) initiated")
+        
         try:
             if not self.layers: # Check if any layers are loaded at all
+                logging.warning("Raster Analysis requested but no layers are loaded")
                 QErrorMessage(self).showMessage("No layers loaded. Please load an image first.")
                 return
+            
+            logging.info(f"Total layers available: {len(self.layers)}")
+            for idx, layer in enumerate(self.layers):
+                logging.info(f"  Layer {idx}: '{layer['name']}' - Shape: {layer['data'].shape}")
+            
+            #checking for its wavelengths attribute
 
             # Keep a single instance of the window to avoid duplicates
             if self.raster_analysis_window and self.raster_analysis_window.isVisible():
+                logging.info("Raster Analysis window already open, activating it")
                 self.raster_analysis_window.activateWindow()
                 return
             
+            logging.info("Creating new Raster Calculator window")
             # Pass the ENTIRE list of layers to the calculator
             self.raster_analysis_window = RasterCalculatorWindow(
                 all_layers=self.layers, 
@@ -1503,9 +2012,15 @@ class ImageViewerWindow(QMainWindow):
             
             # The signal/slot connection remains the same
             self.raster_analysis_window.calculation_complete.connect(self._add_new_layer_from_analysis)
+            logging.info("Raster Calculator window created and connected")
+            
             self.raster_analysis_window.show()
+            logging.info("COMPLETED: Raster Calculator window displayed")
+            logging.info("="*80)
             
         except Exception as e:
+            logging.error(f"ERROR in Raster Analysis: {str(e)}", exc_info=True)
+            logging.error("="*80)
             QErrorMessage(self).showMessage(f"Raster Analysis error: {e}")
             
 # --- ADD THIS ENTIRE FUNCTION ---
@@ -1514,15 +2029,20 @@ class ImageViewerWindow(QMainWindow):
             This slot receives the data from the RasterCalculatorWindow and adds it
             as a new layer to the application.
             """
-            logging.info(f"parameters received in _add_new_layer_from_analysis: result_array shape {result_array.shape}, layer_name '{layer_name}', parent_layer_name '{parent_layer_name}'")
+            logging.info("="*80)
+            logging.info("START: Adding new layer from analysis/calculation")
+            logging.info(f"New layer name: '{layer_name}'")
+            logging.info(f"Result array shape: {result_array.shape}")
+            logging.info(f"Data type: {result_array.dtype}")
+            logging.info(f"Parent layer: '{parent_layer_name}'")
+            
             try:
-                print(f"Received new layer '{layer_name}' with shape {result_array.shape}")
                 # 1. Get metadata from the specific parent layer passed by the calculator
                 parent_metadata = {}
                 parent_geotransform = None
                 parent_projection = None
                 #checking the attribute of layers
-                print("Current layers before addition:", [lyr["name"] for lyr in self.layers])
+                logging.info(f"Current layers before addition: {[lyr['name'] for lyr in self.layers]}")
                 if parent_layer_name:
                     # parent_layer = self._find_layer_by_name(parent_layer_name)
                     parent_layer = next((layer for layer in self.layers if layer["name"] == parent_layer_name), None)
@@ -1531,15 +2051,12 @@ class ImageViewerWindow(QMainWindow):
                         parent_metadata = parent_layer.get("metadata", {})
                         parent_geotransform = parent_layer.get("GeoTransform", None)
                         parent_projection = parent_layer.get("Projection", None)
-                        print("Projection of parent layer:", parent_projection)
                         logging.info(f"Using metadata from parent layer '{parent_layer_name}'")
+                        logging.info(f"Parent projection: {parent_projection}")
                     else:
-                        print(f"Warning: Parent layer '{parent_layer_name}' not found. Using default metadata.")
+                        logging.warning(f"Parent layer '{parent_layer_name}' not found. Using default metadata.")
                 else:
-                    print("No parent layer specified. Using default metadata.")
-                #printing keys of parent metadata
-                # print(f"Parent layer datatype: {type(parent_metadata)}")
-                # print(f"Parent layer metadata keys: {list(parent_metadata.keys()) if parent_metadata else 'None'}")
+                    logging.info("No parent layer specified. Using default metadata.")
 
                 layer_metadata = parent_metadata.copy() if parent_metadata else {}
                 # Remove wavelength fields if present
@@ -1551,8 +2068,6 @@ class ImageViewerWindow(QMainWindow):
                 layer_metadata.pop("FWHM", None)
                 layer_metadata.pop("band_names", None)
 
-                #Keys after removal
-                # print(f"Layer metadata keys after removal: {list(layer_metadata.keys()) if layer_metadata else 'None'}")
                 # Determine band count
                 if result_array.ndim == 2:
                     band_count = 1
@@ -1560,6 +2075,8 @@ class ImageViewerWindow(QMainWindow):
                     band_count = result_array.shape[2]
                 else:
                     raise ValueError(f"Unexpected array shape: {result_array.shape}")
+
+                logging.info(f"Band count in result: {band_count}")
 
                 # Update band count in metadata
                 layer_metadata["band_count"] = band_count
@@ -1583,111 +2100,40 @@ class ImageViewerWindow(QMainWindow):
                     "dtype": str(result_array.dtype),
                     "visible": True
                 }
-
-
+                logging.info(f"New layer dictionary created with {band_count} band(s)")
+                
                 #adding metadata to new layer
                 new_layer["metadata"]["Data Type"] = new_layer["dtype"]
-                # print(f"New layer metadata: {new_layer['metadata']}")
-                #checking the number of bands in new layer
-                # print(f"New layer '{layer_name}' has {new_layer['data'].shape[2]} bands.")
-                # print(f"Updated new layer metadata: {new_layer['metadata']}")
-
-
-
+                
                 # This assumes your main window has a list called `self.layers`
                 self.layers.insert(0, new_layer)  # Add to the top of the list
-                print("Current layers after addition:", [lyr["name"] for lyr in self.layers])
-                self._refresh_layer_list()  # Refresh the UI list to show the new layer
-                self.layer_list.setCurrentRow(0)  # Select the new layer
-                self._update_band_combos_for_active_layer()  # Update band combos
-                self._update_display()  # Refresh the main display to include the new layer
-            
+                logging.info(f"Layer '{layer_name}' inserted at position 0")
+                logging.info(f"Total layers now: {len(self.layers)}")
+                logging.info(f"Current layers: {[lyr['name'] for lyr in self.layers]}")
                 
+                self._refresh_layer_list()  # Refresh the UI list to show the new layer
+                logging.info("Layer list UI refreshed")
+                
+                self.layer_list.setCurrentRow(0)  # Select the new layer
+                logging.info(f"New layer '{layer_name}' set as active")
+                
+                self._update_band_combos_for_active_layer()  # Update band combos
+                logging.info("Band combos updated")
+                
+                self._update_display()  # Refresh the main display to include the new layer
+                logging.info("Display updated")
+            
+                logging.info("="*80)
+                logging.info(f"COMPLETED: New layer '{layer_name}' added successfully")
+                logging.info("="*80)
                 QMessageBox.information(self, "Success", f"Successfully added layer:\n'{layer_name}'")
 
             except Exception as e:
+                logging.error(f"ERROR while adding new layer from analysis: {str(e)}", exc_info=True)
+                logging.error("="*80)
                 QMessageBox.critical(self, "Error", f"Could not add new layer: {e}")
 
-    def on_viewport_changed(self, ax):
-        """Called when user pans or zooms - renders only visible area"""
-        if not self.layers or self.active_layer_index < 0:
-            return
-            
-        # Get current viewport bounds
-        xlim = self.ax.get_xlim()
-        ylim = self.ax.get_ylim()
-        
-        # Only update if viewport changed significantly
-        if self.current_viewport:
-            old_xlim, old_ylim = self.current_viewport
-            if (abs(xlim[0] - old_xlim[0]) < 10 and abs(xlim[1] - old_xlim[1]) < 10 and
-                abs(ylim[0] - old_ylim[0]) < 10 and abs(ylim[1] - old_ylim[1]) < 10):
-                return
-        
-        self.current_viewport = (xlim, ylim)
-        self.render_viewport()
-
-    def render_viewport(self):
-        """Render only the visible portion of the image"""
-        if not self.layers or self.active_layer_index < 0:
-            return
-        
-        active_layer = self.layers[self.active_layer_index]
-        full_data = active_layer['data']
-        
-        # Get viewport bounds
-        xlim = self.ax.get_xlim() 
-        ylim = self.ax.get_ylim()
-        
-        # Convert to data coordinates (handle inverted y-axis)
-        x_start = max(0, int(xlim[0]))
-        x_end = min(full_data.shape[1], int(xlim[1]) + 1)
-        y_start = max(0, int(ylim[1]))  # Note: ylim is inverted
-        y_end = min(full_data.shape[0], int(ylim[0]) + 1)
-        
-        # Extract viewport data
-        viewport_data = full_data[y_start:y_end, x_start:x_end, :]
-        
-        if viewport_data.size == 0:
-            return
-        
-        # Render the viewport
-        viewport_image = self.render_viewport_image(viewport_data)
-        
-        if viewport_image is not None:
-            # Clear and redraw only the viewport
-            self.ax.clear()
-            self.ax.imshow(viewport_image, 
-                        extent=[x_start, x_end, y_end, y_start],
-                        aspect='auto', 
-                        interpolation='nearest')
-            self.canvas.draw_idle()  # Use draw_idle for better performance
-
-    def render_viewport_image(self, viewport_data):
-        """Render viewport data based on current display mode"""
-        if self.current_mode == MODE_SINGLE:
-            band_index = self.single_band_combo.currentIndex()
-            if 0 <= band_index < viewport_data.shape[2]:
-                band_data = viewport_data[:, :, band_index]
-                return self._normalize_for_display(band_data)
-        
-        elif self.current_mode == MODE_RGB:
-            r_idx = self.r_combo.currentIndex()
-            g_idx = self.g_combo.currentIndex() 
-            b_idx = self.b_combo.currentIndex()
-            
-            if (0 <= r_idx < viewport_data.shape[2] and 
-                0 <= g_idx < viewport_data.shape[2] and 
-                0 <= b_idx < viewport_data.shape[2]):
-                
-                r_band = self._normalize_for_display(viewport_data[:, :, r_idx])
-                g_band = self._normalize_for_display(viewport_data[:, :, g_idx])
-                b_band = self._normalize_for_display(viewport_data[:, :, b_idx])
-                
-                return np.stack([r_band, g_band, b_band], axis=2)
-        
-        return None
-
+    # ---------------- PPI CALCULATOR ---------------
 # 
     def _PPI_Calculator(self):
         print("PPI button Clicked")

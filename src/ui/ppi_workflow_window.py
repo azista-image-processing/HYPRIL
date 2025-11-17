@@ -1,3 +1,5 @@
+#src/ui/ppi_workflow_window.py
+
 import os
 os.environ["VISPY_BACKEND"] = "pyside6"
 
@@ -250,25 +252,6 @@ class PPI_Workflow_Window(QMainWindow):
             button.setEnabled(enabled)
 
 
-    # def _update_workflow_state(self, layers_set=None):
-    #     """Enable/disable buttons based on processing progress."""
-    #     if layers_set is None:
-    #         # Determine if layers are set based on processor state
-    #         layers_set = (hasattr(self.processor, 'processing_layer') and 
-    #                     hasattr(self.processor, 'original_layer') and 
-    #                     self.processor.processing_layer is not None and 
-    #                     self.processor.original_layer is not None)
-        
-    #     ppi_calculated = (hasattr(self.processor, 'ppi_scores') and 
-    #                     self.processor.ppi_scores is not None)
-    #     endmembers_extracted = (hasattr(self.processor, 'endmembers') and 
-    #                         self.processor.endmembers is not None)
-        
-    #     self.run_ppi_btn.setEnabled(layers_set)
-    #     self.extract_endmembers_btn.setEnabled(ppi_calculated)
-    #     self.nd_visualizer_btn.setEnabled(endmembers_extracted)
-    #     self.run_abundance_btn.setEnabled(endmembers_extracted)
-
     def _cleanup_child_windows(self):
         """Close and cleanup all child plot windows."""
         windows_to_close = [
@@ -356,6 +339,8 @@ class PPI_Workflow_Window(QMainWindow):
         ppi_scores, projections, skewers = result  # skewers: list of (extreme_pos) for lines
         ppi_1d = ppi_scores.flatten()
         print(f"PPI complete: scores shape {ppi_scores.shape}, projections {projections.shape}")
+
+
 
  
     @Slot()
@@ -450,22 +435,3 @@ class PPI_Workflow_Window(QMainWindow):
         
         self.abundance_window.show()
         self.status_label.setText("Workflow complete. Abundance maps generated.")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
